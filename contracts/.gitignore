@@ -1,0 +1,10 @@
+# Foundry build artifacts and deps — never commit.
+cache/
+out/
+node_modules/
+broadcast/
+# Keep deployment records (base-sepolia.json), drop dry-run/simulation logs.
+!broadcast/
+broadcast/**/dry-run/
+# Local secrets.
+.env
