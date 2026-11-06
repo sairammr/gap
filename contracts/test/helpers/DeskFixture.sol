@@ -143,16 +143,10 @@ abstract contract DeskFixture is Test {
         // Fact 3. `AQUA.pull` is a real `transferFrom` out of this wallet, for all three tokens:
         // the option token on an ask fill, the quote on a bid fill, the cover on a self-write.
         //
-        // KNOWN DESK BUG — READ THIS BEFORE DEBUGGING A BID THAT REVERTS `SafeTransferFromFailed`.
-        // `WeekendDesk.gapOptionCallback` does `forceApprove(AQUA, premiumOwed)` on the quote
-        // token, which OVERWRITES the standing max approval set here; `AQUA.push` then spends it
-        // down to exactly zero. So after the first ask fill the desk can no longer pay out any
-        // quote, and a bid fill reverts inside `AQUA.pull` with `ERC20InsufficientAllowance`.
-        // The same hole closes a PUT desk's ask side, where the cover itself is quote.
-        // This fixture does NOT paper over it: the fix belongs in the desk (approve the max, or
-        // only top up when the standing allowance is short). Until it lands, a sell-back test
-        // has to re-run `desk.approveAqua(address(quote), type(uint256).max)` after its setup
-        // buy, and should say in a comment that it is working around this.
+        // The desk pays out quote on a bid and pulls cover on an ask, so Aqua needs a standing
+        // allowance for all three. `gapOptionCallback` tops this up only when it is short, and
+        // tops up to max — approving exactly `premiumOwed` there would let `AQUA.push` spend the
+        // allowance to zero and silently kill every later pull (fixed in 683b60d).
         desk.approveAqua(optionToken, type(uint256).max);
         desk.approveAqua(address(underlying), type(uint256).max);
         desk.approveAqua(address(quote), type(uint256).max);
