@@ -74,20 +74,65 @@ no CLOB. Quoting across makers picks the cheapest solvent one; since pricing ign
 
 ## 4. Oracle
 
-`IPriceOracle` as they define it:
+`IPriceOracle` as the source defines it:
 
 ```solidity
 function spot(address asset) external view returns (uint256 price, uint256 updatedAt);
 function settlementPrice(address asset, uint64 expiry) external view returns (uint256 price, bool ok);
 ```
 
-`spot` is for quoting and display — their comment: *"Never for exercise."*
-`settlementPrice` gates `settle`: `ok == false` until final.
+`spot` is for quoting and display — their comment: *"Never for exercise."* `settlementPrice`
+gates `settle`: `ok == false` until final.
 
-This port keeps the Uniswap v4 `StateView.getSlot0` reader as the `spot` implementation
-and the settlement source. Instantaneous `slot0` is manipulable on a thin pool; that risk
-is materially reduced here because exercise — the holder's primary route — never reads it.
-A Pyth-style time-weighted window is a later swap behind the same interface.
+### CRITICAL — settlement is manipulable today, and it takes value from holders
+
+`V4SpotOracle.recordSettlement` is **permissionless**, callable by anyone at or after expiry,
+reads an **instantaneous** `slot0` through `spot()`, and is **irrevocable** — `recorded[asset][expiry]`
+makes it one-shot. No TWAP, no observation window, no staleness bound, no sanity band.
+
+So the settlement price for every unexercised option in a series is whatever `slot0` happens to
+read at a moment the caller chooses. One atomic transaction does it: move the v4 pool, call
+`recordSettlement`, unwind. The price is then locked forever and `settle` consumes it.
+
+**The payoff.** On a CALL, forcing the recorded price to `<= strike` sets `hU = 0`. Holders of
+in-the-money unexercised options receive **nothing**; writers take the entire pool. That is a
+direct transfer of holders' intrinsic value to writers, available to anyone, atomically. The
+natural attacker is a writer in that series. A holder cannot defend — it is a race won with a
+flash loan, and their only counter was to have exercised before expiry.
+
+**Why this section previously said otherwise, and why that was wrong.** An earlier revision
+argued the `slot0` risk "is materially reduced here because exercise — the holder's primary
+route — never reads it." That is true of `exercise` and irrelevant to `settle`. Settlement is
+the *entire* payout path for every option that was not exercised, which is exactly the
+population §1, §6.4 and §9 are about. Calling a Pyth-style window "a later swap behind the same
+interface" framed a prerequisite as a nice-to-have.
+
+**Note the document's own risk weighting was inverted.** The `close` hazard (§10) received a
+decision, a rejected-alternatives list and an accepted-cost paragraph — for an extraction that
+is zero-sum *between writers* and never touches holders. This one takes value *from holders*,
+is cheaper to execute, and had three sentences arguing it away. Corrected here.
+
+### DECIDED: fix before deploy. Not acceptable as a known risk.
+
+Unlike the §10 close guard, whose cost is a bounded liveness loss, **there is no bound on the
+loss here** — it is the whole in-the-money value of every unexercised position in the series,
+and the party who loses it has no defence. Nothing ships with this open.
+
+The fix is cheap and sits entirely inside the oracle, behind the same `IPriceOracle` interface,
+so nothing above it changes:
+
+1. **Bound `recordSettlement` to a short window after expiry.** Outside it, refuse.
+2. **Require multiple observations** across distinct blocks within that window, and settle on
+   their median or time-weighted average rather than a single `slot0`.
+
+Both together: a single-block manipulation can no longer set the price, because one observation
+cannot carry the result, and an attacker must hold the pool off-market across several blocks
+within a window they do not control.
+
+`_settle`'s oracle *sequence* stays exactly as §10 specifies — the defect is in the oracle
+implementation, not in `_settle`. Until the fix lands, the suite carries a test that documents
+the exposure (manipulated price below strike on an ITM CALL; holders redeem 0; writers take the
+pool) so it fails loudly rather than passing silently.
 
 ## 5. Reused from the existing repo
 
