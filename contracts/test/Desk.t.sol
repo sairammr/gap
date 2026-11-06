@@ -106,6 +106,7 @@ contract DeskTest is Test {
             quote: address(usdc),
             volWad: VOL,
             minPremiumBps: 0,
+            maxSecondsToExpiry: type(uint64).max,
             salt: bytes32(0)
         });
     }

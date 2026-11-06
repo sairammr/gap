@@ -22,5 +22,6 @@
   "swapVmRouter": "0x09235bE12Ab393C8B4343Db8d329F5B29B5F3B72",
   "underlyingIsCurrency0": false,
   "usdc": "0x682DE63021755a7c75d34BF6Bd1eC289F2546c81",
-  "weekendOptions": "0xfa13A08f960Ce09b5Cc73dc560Eff9d79B980166"
+  "weekendOptions": "0xfa13A08f960Ce09b5Cc73dc560Eff9d79B980166",
+  "askDeadline": 1825534548
 }

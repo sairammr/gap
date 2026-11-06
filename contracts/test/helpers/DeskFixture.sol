@@ -182,6 +182,7 @@ abstract contract DeskFixture is Test {
             quote: address(quote),
             volWad: VOL_SELF,
             minPremiumBps: 0,
+            maxSecondsToExpiry: type(uint64).max,
             salt: bytes32(0)
         });
     }
