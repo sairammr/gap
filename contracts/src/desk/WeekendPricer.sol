@@ -56,6 +56,7 @@ contract WeekendPricer is IStaticExtruction {
     error WrongSeriesToken(address expected, address actual);
     error SeriesExpired(uint64 expiry);
     error ZeroPremium();
+    error PremiumBelowFloor(uint256 premium, uint256 floor);
     error ZeroAmount();
 
     constructor(WeekendOptions app, IPriceOracle oracle, address quote, uint8 quoteDecimals) {
@@ -65,12 +66,29 @@ contract WeekendPricer is IStaticExtruction {
         QUOTE_TO_WAD = 10 ** (18 - quoteDecimals);
     }
 
+    /// @notice The maker's minimum acceptable premium per 1e18 options, in quote units.
+    /// @dev `GapPricing.normalCdf` returns exactly 0 beyond -8 sigma, so `GapPricing.call`
+    /// returns exactly 0 once `d1 <= -8` — at spot 205 / 7d / 50% vol that is any strike at or
+    /// above ~1.76x spot, and `createSeries` accepts any `strike > 0`. A zero or dust premium
+    /// would let a taker drain a maker's entire shipped cover into a worthless series for
+    /// nothing; the Aqua ledger bounds the loss to the ship amount but does not prevent it.
+    /// The floor is bps of the strike notional, which is dimensionally the same thing the
+    /// premium is (quote units per 1e18 options). Credit: found in the core write path, which
+    /// is exposed to the identical attack through `buyOption`.
+    function premiumFloor(uint256 strike, uint16 minPremiumBps) public pure returns (uint256) {
+        return (strike * minPremiumBps) / 10_000;
+    }
+
     /// @notice Premium for one series, in quote-token units per 1e18 options.
     /// @dev Black-Scholes with r = 0 — these options live hours, so `r * T` is noise. `volWad` is
     /// the maker's own number and the only axis two makers quoting the same series differ on; a
     /// maker running both sides simply ships a higher vol on their ask order than on their bid,
     /// which is their spread. No separate spread parameter exists, deliberately.
-    function premiumPerOption(uint256 seriesId, uint256 volWad) public view returns (uint256) {
+    function premiumPerOption(uint256 seriesId, uint256 volWad, uint16 minPremiumBps)
+        public
+        view
+        returns (uint256)
+    {
         WeekendOptions.Series memory s = APP.getSeries(seriesId);
         if (block.timestamp >= s.expiry) revert SeriesExpired(s.expiry);
 
@@ -84,11 +102,20 @@ contract WeekendPricer is IStaticExtruction {
             ? GapPricing.call(spotWad, strikeWad, t, volWad)
             : GapPricing.put(spotWad, strikeWad, t, volWad);
 
-        return premWad / QUOTE_TO_WAD;
+        uint256 premium = premWad / QUOTE_TO_WAD;
+
+        // Unconditional, then the maker's own floor. Both are needed: the first stops the
+        // deep-out-of-the-money zero, the second stops dust, and a maker setting
+        // `minPremiumBps = 0` must not re-open the first.
+        if (premium == 0) revert ZeroPremium();
+        uint256 floor = premiumFloor(s.strike, minPremiumBps);
+        if (premium < floor) revert PremiumBelowFloor(premium, floor);
+
+        return premium;
     }
 
     /// @inheritdoc IStaticExtruction
-    /// @dev `args = abi.encode(uint256 seriesId, uint256 volWad, uint8 side)`, carried in the
+    /// @dev `args = abi.encode(uint256 seriesId, uint256 volWad, uint16 minPremiumBps, uint8 side)`, carried in the
     /// maker's program bytes and therefore covered by the order hash. Returns `nextPC` unchanged
     /// (no jump) and consumes zero taker args.
     function extruction(
@@ -99,38 +126,59 @@ contract WeekendPricer is IStaticExtruction {
         bytes calldata args,
         bytes calldata
     ) external view override returns (uint256, uint256, SwapRegisters memory) {
-        (uint256 seriesId, uint256 volWad, uint8 side) = abi.decode(args, (uint256, uint256, uint8));
-
-        address optionToken = address(APP.getSeries(seriesId).token);
-        _gateDirection(side, query, optionToken);
-
-        uint256 premium = premiumPerOption(seriesId, volWad);
-        if (premium == 0) revert ZeroPremium();
+        (uint8 side, uint256 premium) = _validateAndPrice(query, args);
 
         SwapRegisters memory out = swap;
+        _fillMissingLeg(out, side, query.isExactIn, premium);
 
-        // Rounding always favours the maker: floor what the maker pays out, ceil what it takes in.
+        return (nextPC, 0, out);
+    }
+
+    /// @dev Decode, gate the direction, and price. Split out of `extruction` so the decoded
+    ///      arguments die before the registers are touched — this file is compiled without
+    ///      via_ir and the combined frame does not fit otherwise.
+    function _validateAndPrice(SwapQuery calldata query, bytes calldata args)
+        private
+        view
+        returns (uint8 side, uint256 premium)
+    {
+        uint256 seriesId;
+        uint256 volWad;
+        uint16 minPremiumBps;
+        (seriesId, volWad, minPremiumBps, side) = abi.decode(args, (uint256, uint256, uint16, uint8));
+
+        _gateDirection(side, query, address(APP.getSeries(seriesId).token));
+        // Reverts on a zero or below-floor premium; nothing downstream may see a dust price.
+        premium = premiumPerOption(seriesId, volWad, minPremiumBps);
+    }
+
+    /// @dev Fills whichever amount register the taker did not specify.
+    ///      Rounding always favours the maker: floor what the maker pays out, ceil what it
+    ///      takes in. Split out of `extruction` to keep that frame within stack limits — this
+    ///      file is compiled without via_ir.
+    function _fillMissingLeg(SwapRegisters memory out, uint8 side, bool isExactIn, uint256 premium)
+        private
+        pure
+    {
         if (side == SIDE_ASK) {
             // Taker pays quote (in), receives options (out).
-            if (query.isExactIn) {
-                if (swap.amountIn == 0) revert ZeroAmount();
-                out.amountOut = (swap.amountIn * 1e18) / premium;
+            if (isExactIn) {
+                if (out.amountIn == 0) revert ZeroAmount();
+                out.amountOut = (out.amountIn * 1e18) / premium;
             } else {
-                if (swap.amountOut == 0) revert ZeroAmount();
-                out.amountIn = _ceilDiv(swap.amountOut * premium, 1e18);
+                if (out.amountOut == 0) revert ZeroAmount();
+                out.amountIn = _ceilDiv(out.amountOut * premium, 1e18);
             }
         } else {
             // Taker delivers options (in), receives quote (out).
-            if (query.isExactIn) {
-                if (swap.amountIn == 0) revert ZeroAmount();
-                out.amountOut = (swap.amountIn * premium) / 1e18;
+            if (isExactIn) {
+                if (out.amountIn == 0) revert ZeroAmount();
+                out.amountOut = (out.amountIn * premium) / 1e18;
             } else {
-                if (swap.amountOut == 0) revert ZeroAmount();
-                out.amountIn = _ceilDiv(swap.amountOut * 1e18, premium);
+                if (out.amountOut == 0) revert ZeroAmount();
+                out.amountIn = _ceilDiv(out.amountOut * 1e18, premium);
             }
         }
-
-        return (nextPC, 0, out);
     }
 
     /// @dev Refuses any fill whose direction does not match the side the maker shipped.
