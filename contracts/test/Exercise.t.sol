@@ -150,13 +150,27 @@ contract ExerciseTest is Test {
     // assertion that exercise "doesn't call the oracle" by inspection — it is a proof: if
     // `exercise` touched the oracle through any path that matters (spot, or anything derived
     // from it), it would see the same zero and fail the same way `buyOption` does. It doesn't.
+    //
+    // Rider C: a zero spot proves exercise does not REQUIRE a valid price, but `V4SpotOracle`
+    // answers (0, 0) instead of reverting, so an accidental no-op oracle call added to `exercise`
+    // later would see that zero and still pass. `vm.mockCallRevert` makes ANY call to the oracle
+    // unconditionally revert, so an added call would fail loudly -- this converts the headline
+    // claim from "established by code inspection" into "enforced by CI".
     function test_exercise_readsNoOracle() public {
         uint256 id = _callSeries();
-        _shipAndBuy(id, 10e18, buyer);
+        _shipAndBuy(id, 20e18, buyer);
+
         stateView.setSqrtPriceX96(0); // any oracle read would now price at zero
         vm.prank(buyer);
         app.exercise(id, 10e18); // must still succeed
         assertEq(nvdax.balanceOf(buyer), 10e18);
+
+        // Stronger than the zero-spot case above: the oracle now reverts outright on any call,
+        // so a no-op read that would have survived a zero spot cannot survive this.
+        vm.mockCallRevert(address(oracle), abi.encodeWithSelector(oracle.spot.selector), "oracle must not be read");
+        vm.prank(buyer);
+        app.exercise(id, 10e18); // must still succeed with the oracle unconditionally reverting
+        assertEq(nvdax.balanceOf(buyer), 20e18);
     }
 
     // Ruling 4: assert the delta across the exercise call, not an absolute balance — the buyer

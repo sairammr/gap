@@ -100,6 +100,8 @@ contract WeekendOptions is AquaApp {
 
     event Exercised(uint256 indexed seriesId, address indexed holder, uint256 amount);
 
+    event Closed(uint256 indexed seriesId, address indexed writer, uint256 amount);
+
     // ---------------------------------------------------------------- errors
 
     error BadSeries();
@@ -116,6 +118,8 @@ contract WeekendOptions is AquaApp {
     error PremiumBelowFloor();
     error NotExercisable();
     error TransferFailed();
+    error CloseAfterExercise();
+    error ShortPull();
 
     constructor(address quote_, OptionTokenFactory factory_, IAqua aqua_, IPriceOracle oracle_) AquaApp(aqua_) {
         quote = quote_;
@@ -133,7 +137,13 @@ contract WeekendOptions is AquaApp {
         external
         returns (uint256 id)
     {
-        if (expiry <= block.timestamp || expiry > block.timestamp + 400 days || strike == 0) revert BadSeries();
+        // Rider A: the source protocol gated underlyings behind an owner allowlist; this port
+        // deliberately has no allowlist (no admin key in a contract whose claim is that nothing
+        // can be seized), but a series whose underlying IS the quote token is incoherent on its
+        // own terms (the writer locks and the exerciser pays the SAME asset) and is rejected.
+        if (
+            expiry <= block.timestamp || expiry > block.timestamp + 400 days || strike == 0 || underlying == quote
+        ) revert BadSeries();
 
         bytes32 key = keccak256(abi.encode(underlying, expiry, kind, strike));
         uint256 existing = seriesIdOf[key];
@@ -296,7 +306,14 @@ contract WeekendOptions is AquaApp {
 
         // Interactions: take the cover, mint the option, collect the premium.
         bytes32 hash = hashStrategy(s);
+        // Rider B: `AQUA.pull` moves `safeTransferFrom(maker, this, need)` but never measures
+        // what actually arrived. A fee-on-transfer or rebasing underlying would otherwise
+        // under-collateralize the series silently (the pool leg above is already credited with
+        // the FULL `need`). Measuring the real balance delta and reverting on a shortfall is
+        // what makes that pool credit honest.
+        uint256 balBefore = IERC20Metadata(token).balanceOf(address(this));
         AQUA.pull(s.maker, hash, token, need, address(this));
+        if (IERC20Metadata(token).balanceOf(address(this)) - balBefore < need) revert ShortPull();
         ser.token.mint(a.to, a.amount);
         _collectPremium(s.maker, hash, premium, a.to, takerData);
 
@@ -376,5 +393,62 @@ contract WeekendOptions is AquaApp {
         }
 
         emit Exercised(id, msg.sender, amount);
+    }
+
+    // ---------------------------------------------------------------- close
+
+    /// @notice Pre-expiry writer unwind: burn `amount` of the caller's written position and
+    /// release their pro-rata share of both pool legs, directly to their wallet.
+    /// @dev Pro-rata is computed on the PRE-decrement `totalWritten` — the ordering below is
+    /// load-bearing, matching the source protocol's `close`. Effects (burn, bookkeeping) happen
+    /// strictly before either ERC-20 leg moves.
+    ///
+    /// Proceeds go straight to `msg.sender`'s wallet, never through `AQUA.push`: this port has
+    /// no `freeBalance` ledger, and `push` reverts `PushToNonActiveStrategyPrevented` once a
+    /// maker has docked their strategy, which would otherwise strand a writer's own claim behind
+    /// their own revocation.
+    ///
+    /// RULING 13 — knowing divergence from the source protocol, not in the original brief.
+    /// `close` pays pro-rata across BOTH legs on the pre-decrement `totalWritten`. A writer who
+    /// enters a CALL series AFTER holders have exercised buys into a pool that already holds
+    /// cash banked at the strike, and this payout rule lets them extract that cash immediately —
+    /// profitable at every spot below the strike, and zero-sum against the writers who were
+    /// already there (worked example: W=10 written, X=4 exercised, strike 205, an attacker
+    /// writes A=10 and closes it for outU = (W-X+A)*A/(W+A) = 8e18 and outC =
+    /// X*K*A/(W+A) = 410e6 against a cost of 10*spot — a profit at spot 201, for instance).
+    /// So `close` additionally reverts once the OPPOSITE leg is non-empty: `poolCash` on a CALL,
+    /// `poolUnderlying` on a PUT. Only `exercise` credits that opposite leg pre-expiry, and
+    /// `settle` deliberately never touches the pools, so a single exercise anywhere in a
+    /// series's life shuts this path for the rest of its life.
+    ///
+    /// The trade this accepts: a holder of as little as 1 wei of options can exercise (a dust
+    /// strike still rounds up to one quote unit, ~1e-6 USDC, under `fullMulDivUp`) and freeze
+    /// `close` for every writer in the series until expiry — a bounded LIVENESS hole in exchange
+    /// for closing a VALUE hole. That is acceptable because the freeze itself extracts nothing,
+    /// and every writer is still made whole at settlement (Task 7/8) regardless.
+    function close(uint256 id, uint256 amount) external {
+        if (id >= _series.length) revert BadSeries();
+        Series storage s = _series[id];
+        if (block.timestamp >= s.expiry) revert Expired();
+        if (amount == 0 || written[id][msg.sender] < amount) revert BadAmount();
+        if (s.kind == Kind.CALL ? s.poolCash != 0 : s.poolUnderlying != 0) revert CloseAfterExercise();
+
+        // Effects.
+        s.token.burn(msg.sender, amount);
+
+        uint256 totalWritten = s.totalWritten; // pre-decrement snapshot — order is load-bearing
+        uint256 outU = F.fullMulDiv(s.poolUnderlying, amount, totalWritten); // floors
+        uint256 outC = F.fullMulDiv(s.poolCash, amount, totalWritten); // floors
+
+        written[id][msg.sender] -= amount;
+        s.totalWritten = totalWritten - amount;
+        s.poolUnderlying -= outU;
+        s.poolCash -= outC;
+
+        // Interactions.
+        require(IERC20Metadata(s.underlying).transfer(msg.sender, outU), TransferFailed());
+        require(IERC20Metadata(quote).transfer(msg.sender, outC), TransferFailed());
+
+        emit Closed(id, msg.sender, amount);
     }
 }

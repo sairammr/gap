@@ -13,6 +13,7 @@ import { V4SpotOracle } from "../src/oracle/V4SpotOracle.sol";
 import { MockERC20 } from "../src/mocks/MockERC20.sol";
 import { MockStateView } from "./helpers/MockStateView.sol";
 import { NoOpTaker } from "./helpers/NoOpTaker.sol";
+import { FeeOnTransferERC20 } from "./helpers/FeeOnTransferERC20.sol";
 
 /// @notice The Aqua write path: a maker ships cover, a buyer writes options against it.
 /// @dev Runs against the real `Aqua` contract, not a double. That matters: `ship` moves no
@@ -322,5 +323,48 @@ contract WriteTest is Test {
         // Cover left the wallet; only the premium came back.
         assertEq(usdc.balanceOf(maker), prem);
         assertEq(app.written(id, maker), 10e18);
+    }
+
+    /// @dev Rider B: `AQUA.pull` moves `safeTransferFrom(maker, app, need)` but never measures
+    ///      what actually landed. A fee-on-transfer underlying delivers less than `need`, which
+    ///      would silently under-collateralize the series unless `_buyOption` snapshots its own
+    ///      balance before and after the pull and refuses the fill on a shortfall.
+    function test_buyOption_revertsOnShortfallFromFeeOnTransferUnderlying() public {
+        FeeOnTransferERC20 feeToken = new FeeOnTransferERC20("Fee NVDA", "fNVDAx", 18, 100); // 1% fee
+        oracle.setPool(address(feeToken), bytes32(uint256(2)), 18, true); // same stateView price
+
+        WeekendOptions.Strategy memory s = WeekendOptions.Strategy({
+            app: address(app),
+            maker: maker,
+            underlying: address(feeToken),
+            quote: address(usdc),
+            volWad: VOL,
+            minPremiumBps: 0,
+            salt: bytes32(0)
+        });
+        uint256 id = app.createSeries(address(feeToken), expiry, Kind.CALL, STRIKE);
+
+        feeToken.mint(maker, 10e18);
+        address[] memory tokens = new address[](2);
+        uint256[] memory amounts = new uint256[](2);
+        tokens[0] = address(feeToken);
+        amounts[0] = 10e18;
+        tokens[1] = address(usdc);
+        amounts[1] = 0;
+        vm.startPrank(maker);
+        feeToken.approve(address(aqua), type(uint256).max);
+        usdc.approve(address(aqua), type(uint256).max);
+        aqua.ship(address(app), abi.encode(s), tokens, amounts);
+        vm.stopPrank();
+
+        bytes32 hash = keccak256(abi.encode(s));
+        vm.prank(buyer);
+        vm.expectRevert(WeekendOptions.ShortPull.selector);
+        taker.buy(app, s, id, 10e18, type(uint256).max, buyer, abi.encode(maker, hash));
+
+        // Refused before anything was booked: the pull itself reverted the whole fill.
+        assertEq(app.getSeries(id).totalWritten, 0);
+        assertEq(app.getSeries(id).poolUnderlying, 0);
+        assertEq(app.written(id, maker), 0);
     }
 }

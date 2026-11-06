@@ -41,6 +41,16 @@ contract SeriesTest is Test {
         app.createSeries(address(nvdax), expiry, Kind.CALL, 0);
     }
 
+    /// @dev Rider A: a series whose underlying IS the quote token is incoherent (the writer
+    ///      would be locking and the exerciser paying the SAME asset). The source protocol
+    ///      caught this behind an owner allowlist; this port deliberately has no allowlist
+    ///      (no admin key in a contract whose claim is that nothing can be seized), but this one
+    ///      case is still rejected outright.
+    function test_createSeries_rejectsUnderlyingEqualsQuote() public {
+        vm.expectRevert(WeekendOptions.BadSeries.selector);
+        app.createSeries(address(usdc), expiry, Kind.CALL, 205e6);
+    }
+
     function test_collateralFor_callLocksUnderlyingPutLocksCashRoundedUp() public {
         uint256 c = app.createSeries(address(nvdax), expiry, Kind.CALL, 205e6);
         (address tc, uint256 nc) = app.collateralFor(c, 10e18);
