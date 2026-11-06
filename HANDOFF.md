@@ -1,6 +1,6 @@
 # Weekend Options on 1inch Aqua — Handoff
 
-**Branch:** `weekend-options-on-aqua` · **Live on Base Sepolia (84532)** · **172 tests green**
+**Branch:** `weekend-options-on-aqua` · **Live on Base Sepolia (84532)** · **172 tests green · full lifecycle proven on chain**
 
 Fully collateralised options on tokenized stocks, traded as 1inch SwapVM orders backed by
 Aqua. Ported from the Weekend Options protocol; the option mechanics are theirs, the trading
@@ -32,14 +32,14 @@ Fully collateralised both sides before a position exists. **No margin, nothing t
 
 | contract | address |
 |---|---|
-| `weekendOptions` | `0xfa13A08f960Ce09b5Cc73dc560Eff9d79B980166` |
-| `desk` | `0xde3e63cF9aE0c941AC5B84eA8c8710880F76a66c` |
-| `pricer` | `0x4Dd17D47fF077b39A2D76be8637274efA402ef73` |
-| `oracle` | `0x36a18A29E45D3A35AEBc7E9387C7A3A27247d2ac` |
-| `optionTokenFactory` | `0xba3Df561822A716B1d4bAe5130d1444ebA75Ad0e` |
-| `optionToken` | `0x326f684e7906e3d1B37E1462b1fE62f0561047e0` |
-| `usdc` | `0x682DE63021755a7c75d34BF6Bd1eC289F2546c81` |
-| `nvdax` | `0xA8FE197d0eFe5AfE56bdc5671731eE393032CAf9` |
+| `weekendOptions` | `0x7031B0eD0Cf2Dc85eC157696B91f3985bD7BCe4f` |
+| `desk` | `0xc05D7b0069DCAF627a94d77e535c3f7b802A1B0C` |
+| `pricer` | `0xE4C03419fc2C4A1BDf283e260d1Cb0B224ce19C9` |
+| `oracle` | `0x9587C0301FeA237B2f6045e2D50C8f9E6d1bf7B1` |
+| `optionTokenFactory` | `0x59D9A317Bf527C3df8B946FFB9e0cF61164f7E32` |
+| `optionToken` | `0x971e9B9738A5cbaAB198a36e2fcc1D165Ef2A30e` |
+| `usdc` | `0x7b7900fd08aA2b70f9595B3CCE0621baaad54463` |
+| `nvdax` | `0x11Dd00c731F27793Bd9426B8ef22d7971AA2052b` |
 | `swapVmRouter` | `0x09235bE12Ab393C8B4343Db8d329F5B29B5F3B72` |
 | `aqua` | `0x1E522b17600Aa9eE58C7633C528cCC19fdcFcd1f` |
 

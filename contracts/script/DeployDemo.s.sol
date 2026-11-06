@@ -89,16 +89,37 @@ contract DeployDemo is Script {
 
     uint64 internal constant TENOR = 7 days;
 
+    /// @dev The SHORT-DATED series. `vm.warp` does not exist on a live chain, so the only way to
+    ///      reach settlement is to actually wait — which means the series has to be short enough
+    ///      to wait out. 15 minutes leaves room for the deploy sequence plus buy/sell/exercise.
+    uint64 internal constant SHORT_TENOR = 15 minutes;
+    /// @dev Struck 5% BELOW spot, so the series settles genuinely in the money. An ATM strike
+    ///      would settle at `p == strike`, where `holderUnderlying` is exactly 0 and both the
+    ///      redeem and claim legs degenerate into proving nothing.
+    uint256 internal constant SHORT_STRIKE_BPS = 9_500;
+
     /// @dev Spread is vol and nothing else. The self-write vol only sets how much quote has to
     ///      sit idle in the desk; it is never what a taker pays.
     uint256 internal constant VOL_ASK = 0.6e18;
     uint256 internal constant VOL_SELF = 0.5e18;
+    /// @dev Must stay BELOW `VOL_ASK` or the desk can be round-tripped flat. Spread is vol.
+    uint256 internal constant VOL_BID = 0.4e18;
 
     /// @dev The order's own floor, >= the own-strategy's 0 (see `ShipBase.PremiumFloorInversion`).
     uint16 internal constant ASK_MIN_PREMIUM_BPS = 25;
     bytes32 internal constant ASK_SALT = bytes32(uint256(1));
 
+    /// @dev 25 bps of the strike notional is 0.25 quote per option. A 15-minute option's whole
+    ///      TIME value is a fraction of that, so the 7-day floor would reject the short series'
+    ///      own quote. 1 bp is the fixture's number and is still above dust.
+    uint16 internal constant SHORT_MIN_PREMIUM_BPS = 1;
+    bytes32 internal constant SHORT_ASK_SALT = bytes32(uint256(3));
+    bytes32 internal constant SHORT_BID_SALT = bytes32(uint256(4));
+    /// @dev Quote the bid may ever spend, cumulative and permanent (fact 5).
+    uint256 internal constant BID_BUDGET = 100_000e6;
+
     uint8 internal constant SIDE_ASK = 0;
+    uint8 internal constant SIDE_BID = 1;
 
     // ------------------------------------------------------------------ reused
 
@@ -127,6 +148,18 @@ contract DeployDemo is Script {
     uint64 internal expiry;
     uint256 internal strike;
     bytes32 internal askStrategyHash;
+
+    uint256 internal shortSeriesId;
+    address internal shortOptionToken;
+    uint64 internal shortExpiry;
+    uint256 internal shortStrike;
+    bytes32 internal shortAskStrategyHash;
+    bytes32 internal shortBidStrategyHash;
+
+    /// @dev Recorded, not inferred. Every shipped order carries this deadline in bytes that are
+    ///      covered by the order hash, so a filler that guesses it wrong cannot reproduce the
+    ///      shipped order at all.
+    uint40 internal askDeadline;
 
     // ------------------------------------------------------------------ run
 
@@ -238,17 +271,27 @@ contract DeployDemo is Script {
         require(spot != 0, "oracle reports no spot - pool not initialised?");
         strike = spot;
 
+        askDeadline = uint40(block.timestamp + 365 days);
+
         expiry = uint64(block.timestamp + TENOR);
         seriesId = app.createSeries(address(nvdax), expiry, Kind.CALL, strike);
         optionToken = address(app.getSeries(seriesId).token);
+
+        // The short-dated twin. Different expiry AND different strike, so `seriesIdOf`'s key
+        // cannot collide with the 7-day one.
+        shortExpiry = uint64(block.timestamp + SHORT_TENOR);
+        shortStrike = strike * SHORT_STRIKE_BPS / 10_000;
+        shortSeriesId = app.createSeries(address(nvdax), shortExpiry, Kind.CALL, shortStrike);
+        shortOptionToken = address(app.getSeries(shortSeriesId).token);
     }
 
     function _wireDesk() internal {
         desk = new WeekendDesk(app, aqua, router, address(usdc));
 
-        uint256[] memory ids = new uint256[](1);
-        uint256[] memory caps = new uint256[](1);
+        uint256[] memory ids = new uint256[](2);
+        uint256[] memory caps = new uint256[](2);
         (ids[0], caps[0]) = (seriesId, SERIES_CAP);
+        (ids[1], caps[1]) = (shortSeriesId, SERIES_CAP);
         desk.listSeries(ids, caps);
 
         desk.setOwnStrategy(_ownStrategy());
@@ -261,6 +304,7 @@ contract DeployDemo is Script {
         // Max, not exact: `gapOptionCallback`'s push spends the quote allowance to zero, and an
         // exact approval there silently kills every later pull.
         desk.approveAqua(optionToken, type(uint256).max);
+        desk.approveAqua(shortOptionToken, type(uint256).max);
         desk.approveAqua(address(nvdax), type(uint256).max);
         desk.approveAqua(address(usdc), type(uint256).max);
     }
@@ -275,6 +319,17 @@ contract DeployDemo is Script {
         OrderLib.Order memory o = _askOrder();
         askStrategyHash = _ship(router, abi.encode(o), optionToken, SERIES_CAP, address(usdc), 0);
         require(askStrategyHash == OrderLib.hash(o), "ask strategyHash drift");
+
+        // 3. The SHORT series' ask — same shape, its own salt and its own (much lower) floor.
+        OrderLib.Order memory sa = _shortOrder(SIDE_ASK, SHORT_ASK_SALT);
+        shortAskStrategyHash = _ship(router, abi.encode(sa), shortOptionToken, SERIES_CAP, address(usdc), 0);
+        require(shortAskStrategyHash == OrderLib.hash(sa), "short ask strategyHash drift");
+
+        // 4. The SHORT series' bid: the sell leg is QUOTE, the zero leg the option token. This
+        //    is what lets step 2 of the lifecycle (sell part of the position back) happen at all.
+        OrderLib.Order memory sb = _shortOrder(SIDE_BID, SHORT_BID_SALT);
+        shortBidStrategyHash = _ship(router, abi.encode(sb), address(usdc), BID_BUDGET, shortOptionToken, 0);
+        require(shortBidStrategyHash == OrderLib.hash(sb), "short bid strategyHash drift");
     }
 
     // ------------------------------------------------------------------ pieces
@@ -306,11 +361,30 @@ contract DeployDemo is Script {
                 side: SIDE_ASK,
                 // Well past the series expiry, so a late fill trips `SeriesExpired` (which names
                 // the cause) rather than the `Deadline` opcode (which does not).
-                deadline: uint40(block.timestamp + 365 days),
+                deadline: askDeadline,
                 salt: ASK_SALT,
                 // 0/0 disables `RequireMinRate`. The binding floor is `minPremiumBps` inside the
                 // pricer; the rate guard is a blunt cross-decimal ratio that would reject every
                 // sane 6dp-for-18dp fill.
+                minRateA: 0,
+                minRateB: 0
+            })
+        );
+    }
+
+    function _shortOrder(uint8 side, bytes32 salt) internal view returns (OrderLib.Order memory) {
+        return OrderLib.order(
+            OrderLib.Params({
+                desk: address(desk),
+                pricer: address(pricer),
+                quote: address(usdc),
+                optionToken: shortOptionToken,
+                seriesId: shortSeriesId,
+                volWad: side == SIDE_ASK ? VOL_ASK : VOL_BID,
+                minPremiumBps: SHORT_MIN_PREMIUM_BPS,
+                side: side,
+                deadline: askDeadline,
+                salt: salt,
                 minRateA: 0,
                 minRateB: 0
             })
@@ -388,7 +462,22 @@ contract DeployDemo is Script {
         vm.serializeBytes32(obj, "ownStrategyHash", desk.ownStrategyHash());
         vm.serializeBytes32(obj, "askSalt", ASK_SALT);
         vm.serializeUint(obj, "askVolWad", VOL_ASK);
-        string memory json = vm.serializeBytes32(obj, "askStrategyHash", askStrategyHash);
+        vm.serializeUint(obj, "askMinPremiumBps", uint256(ASK_MIN_PREMIUM_BPS));
+        vm.serializeUint(obj, "askDeadline", uint256(askDeadline));
+        vm.serializeBytes32(obj, "askStrategyHash", askStrategyHash);
+
+        vm.serializeAddress(obj, "shortOptionToken", shortOptionToken);
+        vm.serializeUint(obj, "shortSeriesId", shortSeriesId);
+        vm.serializeUint(obj, "shortExpiry", uint256(shortExpiry));
+        vm.serializeUint(obj, "shortStrike", shortStrike);
+        vm.serializeUint(obj, "shortMinPremiumBps", uint256(SHORT_MIN_PREMIUM_BPS));
+        vm.serializeUint(obj, "shortAskVolWad", VOL_ASK);
+        vm.serializeUint(obj, "shortBidVolWad", VOL_BID);
+        vm.serializeBytes32(obj, "shortAskSalt", SHORT_ASK_SALT);
+        vm.serializeBytes32(obj, "shortBidSalt", SHORT_BID_SALT);
+        vm.serializeUint(obj, "shortBidBudget", BID_BUDGET);
+        vm.serializeBytes32(obj, "shortAskStrategyHash", shortAskStrategyHash);
+        string memory json = vm.serializeBytes32(obj, "shortBidStrategyHash", shortBidStrategyHash);
 
         vm.writeJson(json, JSON_PATH);
     }
@@ -412,5 +501,15 @@ contract DeployDemo is Script {
         console2.log("ownStrategyHash   :", vm.toString(desk.ownStrategyHash()));
         console2.log("askStrategyHash   :", vm.toString(askStrategyHash));
         console2.log("premium/option @ask:", pricer.premiumPerOption(seriesId, VOL_ASK));
+        console2.log("-- short-dated series --");
+        console2.log("shortSeriesId     :", shortSeriesId);
+        console2.log("shortOptionToken  :", shortOptionToken);
+        console2.log("shortStrike (6dp) :", shortStrike);
+        console2.log("shortExpiry       :", uint256(shortExpiry));
+        console2.log("askDeadline       :", uint256(askDeadline));
+        console2.log("shortAskHash      :", vm.toString(shortAskStrategyHash));
+        console2.log("shortBidHash      :", vm.toString(shortBidStrategyHash));
+        console2.log("short prem @ask   :", pricer.premiumPerOption(shortSeriesId, VOL_ASK));
+        console2.log("short prem @bid   :", pricer.premiumPerOption(shortSeriesId, VOL_BID));
     }
 }

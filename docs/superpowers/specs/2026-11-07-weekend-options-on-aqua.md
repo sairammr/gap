@@ -757,6 +757,30 @@ A token-**in** fee is unaffected: with `useTransferFromAndAquaPush` it resolves 
 `ProtocolFeeLib.resolveInSafeTransfer` against the router's own balance, never a maker-side
 pull. Only the token-out fee is.
 
+### 12.6c Two economic holes found by the live lifecycle run
+
+Both surfaced only on a short-dated series. Neither is a bug in the code; both are the
+pricing model meeting a tenor it was not calibrated for.
+
+**1. A constant `minPremiumBps` floor is unusable on a short tenor.** The floor is bps of
+*strike notional*, which does not shrink as time value does. At 25 bps on a 100-strike series
+the floor is 0.25 quote/option — more than the entire time value of a 15-minute option, so a
+maker's own quote reverts `PremiumBelowFloor` against their own floor. The live run had to ship
+the short ask at **1 bp**. **A real short-dated book needs the floor scaled to tenor**, not a
+constant. As it stands a maker running both a weekly and an intraday series cannot use one
+strategy for both.
+
+**2. The vol-only spread collapses to zero where it is needed most.** §12.5 says a two-sided
+maker expresses their spread by shipping a higher `volWad` on the ask than the bid. On an
+in-the-money short-dated call that fails completely: ask vol `0.6` and bid vol `0.4` both
+priced the live series at **exactly `5000000`**. Intrinsic dominates, the time-value
+difference is below 6dp resolution, and it rounds away.
+
+**The buy→sell round trip was therefore free.** A maker quoting both sides of a short-dated ITM
+series can be arbitraged at zero cost, repeatedly, bounded only by their shipped ledger. "The
+spread is vol and nothing else" is not a sufficient design here — it needs an explicit spread
+term, or a minimum spread in quote units, which is a `Strategy` change.
+
 ### 12.7 Transfer ordering is the TAKER's choice
 
 `IS_FIRST_TRANSFER_FROM_TAKER` (`0x0020`) lives in **taker** traits. The maker cannot force it.
