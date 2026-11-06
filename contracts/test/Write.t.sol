@@ -1,0 +1,240 @@
+// SPDX-License-Identifier: MIT
+pragma solidity 0.8.30;
+
+import { Test } from "forge-std/Test.sol";
+
+import { Aqua } from "@1inch/aqua/contracts/Aqua.sol";
+import { IAqua } from "@1inch/aqua/contracts/interfaces/IAqua.sol";
+
+import { Kind, WeekendOptions } from "../src/WeekendOptions.sol";
+import { WeekendTaker } from "../src/WeekendTaker.sol";
+import { OptionTokenFactory } from "../src/OptionToken.sol";
+import { V4SpotOracle } from "../src/oracle/V4SpotOracle.sol";
+import { MockERC20 } from "../src/mocks/MockERC20.sol";
+import { MockStateView } from "./helpers/MockStateView.sol";
+
+/// @notice The Aqua write path: a maker ships cover, a buyer writes options against it.
+/// @dev Runs against the real `Aqua` contract, not a double. That matters: `ship` moves no
+///      tokens, so the maker's wallet and Aqua's books are independent numbers that the app
+///      has to reconcile at `pull` time.
+contract WriteTest is Test {
+    // sqrtPriceX96 constants for the 18dp underlying / 6dp quote, underlyingIsCurrency0 = true
+    // base `spot = 100e18 -> 792281625142643375935439`, scaled by sqrt(P/100).
+    uint160 internal constant SQRT_PRICE_205 = 1134374654051415993876480;
+    uint160 internal constant SQRT_PRICE_300 = 1372272028650298020986880;
+
+    bytes32 internal constant POOL_ID = bytes32(uint256(1));
+    uint256 internal constant STRIKE = 205e6;
+    uint256 internal constant VOL = 0.5e18;
+
+    Aqua internal aqua;
+    WeekendOptions internal app;
+    WeekendTaker internal taker;
+    V4SpotOracle internal oracle;
+    MockStateView internal stateView;
+    MockERC20 internal nvdax;
+    MockERC20 internal usdc;
+
+    address internal maker = address(0xBEEF);
+    address internal buyer = address(0xB0B);
+
+    uint64 internal expiry;
+
+    function setUp() public {
+        aqua = new Aqua();
+        usdc = new MockERC20("USD Coin", "USDC", 6);
+        nvdax = new MockERC20("NVDA xStock", "NVDAx", 18);
+
+        stateView = new MockStateView(SQRT_PRICE_205);
+        oracle = new V4SpotOracle(stateView, 6);
+        oracle.setPool(address(nvdax), POOL_ID, 18, true);
+
+        OptionTokenFactory factory = new OptionTokenFactory();
+        app = new WeekendOptions(address(usdc), factory, IAqua(address(aqua)), oracle);
+        taker = new WeekendTaker(IAqua(address(aqua)), address(app));
+
+        expiry = uint64(block.timestamp + 7 days);
+
+        // The buyer is funded and approved once, so `_buy` is a single external call and
+        // `vm.expectRevert` lands on the call under test.
+        usdc.mint(buyer, 1_000_000e6);
+        vm.prank(buyer);
+        usdc.approve(address(taker), type(uint256).max);
+    }
+
+    // ------------------------------------------------------------------ helpers
+
+    function _strategy() internal view returns (WeekendOptions.Strategy memory) {
+        return WeekendOptions.Strategy({
+            app: address(app),
+            maker: maker,
+            underlying: address(nvdax),
+            quote: address(usdc),
+            volWad: VOL,
+            salt: bytes32(0)
+        });
+    }
+
+    /// @dev Local hash, so no external call stands between `expectRevert` and the call it guards.
+    function _hash() internal view returns (bytes32) {
+        return keccak256(abi.encode(_strategy()));
+    }
+
+    function _callSeries() internal returns (uint256) {
+        return app.createSeries(address(nvdax), expiry, Kind.CALL, STRIKE);
+    }
+
+    function _putSeries() internal returns (uint256) {
+        return app.createSeries(address(nvdax), expiry, Kind.PUT, STRIKE);
+    }
+
+    /// @dev Mint `amount` of `token` to `who` and commit it on Aqua's books. The quote token is
+    ///      always part of the strategy so the premium `push` has an active balance to land in.
+    function _ship(address who, address token, uint256 amount) internal {
+        MockERC20(token).mint(who, amount);
+
+        bool quoteIsCover = token == address(usdc);
+        address[] memory tokens = new address[](quoteIsCover ? 1 : 2);
+        uint256[] memory amounts = new uint256[](quoteIsCover ? 1 : 2);
+        tokens[0] = token;
+        amounts[0] = amount;
+        if (!quoteIsCover) {
+            tokens[1] = address(usdc);
+            amounts[1] = 0;
+        }
+
+        vm.startPrank(who);
+        MockERC20(token).approve(address(aqua), type(uint256).max);
+        usdc.approve(address(aqua), type(uint256).max);
+        aqua.ship(address(app), abi.encode(_strategy()), tokens, amounts);
+        vm.stopPrank();
+    }
+
+    function _buy(uint256 id, uint256 amount, address to) internal returns (uint256) {
+        return _buyWithMax(id, amount, to, type(uint256).max);
+    }
+
+    function _buyWithMax(uint256 id, uint256 amount, address to, uint256 maxPremium)
+        internal
+        returns (uint256)
+    {
+        vm.prank(buyer);
+        return taker.buy(app, _strategy(), id, amount, maxPremium, to, abi.encode(maker, _hash()));
+    }
+
+    function _shipAndBuy(uint256 id, uint256 amount, address to) internal returns (uint256) {
+        _ship(maker, address(nvdax), amount);
+        return _buy(id, amount, to);
+    }
+
+    // ------------------------------------------------------------------ tests
+
+    function test_buy_pullsCoverIntoPoolAndPushesPremiumToMakerWallet() public {
+        uint256 id = _callSeries();
+        _ship(maker, address(nvdax), 10e18);
+        uint256 makerUsdc0 = usdc.balanceOf(maker);
+
+        uint256 prem = _buy(id, 10e18, buyer);
+
+        assertEq(nvdax.balanceOf(maker), 0); // cover left the wallet
+        assertEq(nvdax.balanceOf(address(app)), 10e18); // ...into the pool
+        assertEq(app.getSeries(id).poolUnderlying, 10e18);
+        assertEq(app.getSeries(id).totalWritten, 10e18);
+        assertEq(app.written(id, maker), 10e18);
+        assertEq(app.getSeries(id).token.balanceOf(buyer), 10e18);
+        assertEq(usdc.balanceOf(maker) - makerUsdc0, prem); // premium to the wallet
+    }
+
+    function test_ship_movesNoTokens() public {
+        _ship(maker, address(nvdax), 10e18);
+        assertEq(nvdax.balanceOf(maker), 10e18);
+    }
+
+    // Review Focus 3
+    function test_buy_revertsLegiblyWhenMakerWalletDrainedDespiteAquaBooks() public {
+        uint256 id = _callSeries();
+        _ship(maker, address(nvdax), 10e18);
+        vm.prank(maker);
+        nvdax.transfer(address(0xDEAD), 10e18);
+        (,, uint256 backable) = app.makerCapacity(_strategy(), address(nvdax));
+        assertEq(backable, 0);
+        vm.expectRevert(WeekendOptions.InsufficientMakerCollateral.selector);
+        _buy(id, 10e18, buyer);
+    }
+
+    function test_buy_revertsOverMaxPremiumAndAfterExpiry() public {
+        uint256 id = _callSeries();
+        _ship(maker, address(nvdax), 10e18);
+
+        uint256 prem = app.quotePremium(_strategy(), id, 10e18);
+        assertGt(prem, 0);
+
+        // A taker who will not pay the quoted price is turned away, not silently overcharged.
+        vm.expectRevert(WeekendOptions.PremiumTooHigh.selector);
+        _buyWithMax(id, 10e18, buyer, prem - 1);
+        // Nothing was written on the way out.
+        assertEq(app.getSeries(id).totalWritten, 0);
+        assertEq(nvdax.balanceOf(address(app)), 0);
+
+        // ...and once the series expires there is no writing at any price.
+        vm.warp(expiry);
+        vm.expectRevert(WeekendOptions.Expired.selector);
+        _buy(id, 10e18, buyer);
+    }
+
+    // Spec §6.2 — the product's headline claim: a violent move changes nothing
+    function test_adversePriceMove_leavesThePositionUntouched() public {
+        uint256 id = _callSeries();
+        _shipAndBuy(id, 10e18, buyer);
+        WeekendOptions.Series memory before = app.getSeries(id);
+
+        stateView.setSqrtPriceX96(SQRT_PRICE_300); // +46% overnight gap against the writer
+
+        WeekendOptions.Series memory afterMove = app.getSeries(id);
+        assertEq(afterMove.poolUnderlying, before.poolUnderlying);
+        assertEq(afterMove.totalWritten, before.totalWritten);
+        assertEq(app.written(id, maker), 10e18);
+        assertEq(nvdax.balanceOf(address(app)), 10e18);
+        // there is no liquidate() to call, and no price-triggered path into the contract
+    }
+
+    function test_quotePremium_callIsWorthMoreThanIntrinsic() public {
+        // ATM 205 strike, spot 205, 7d to expiry, 50% IV -> strictly positive, well under spot.
+        uint256 id = _callSeries();
+        uint256 prem = app.quotePremium(_strategy(), id, 1e18);
+
+        assertGt(prem, 0, "ATM time value is not free");
+        assertLt(prem, 205e6, "a call can never be worth more than the underlying");
+        // Closed form for an ATM call at r = 0: S * (2*N(s*sqrt(T)/2) - 1) ~= S * 0.3989 * s*sqrt(T)
+        // = 205 * 0.3989 * 0.5 * sqrt(7/365) ~= 5.66 USDC.
+        assertApproxEqRel(prem, 5.66e6, 0.05e18);
+    }
+
+    /// @dev A silent oracle must not price options at zero. `spot` answers (0, 0) for an
+    ///      uninitialised pool instead of reverting, which would otherwise make every call free
+    ///      and lock the maker's cover for nothing.
+    function test_buy_revertsWhenTheOracleHasNoPrice() public {
+        uint256 id = _callSeries();
+        _ship(maker, address(nvdax), 10e18);
+        stateView.setSqrtPriceX96(0);
+
+        assertEq(app.quotePremium(_strategy(), id, 10e18), 0, "a silent oracle prices at zero");
+        vm.expectRevert(WeekendOptions.NoPrice.selector);
+        _buy(id, 10e18, buyer);
+    }
+
+    /// @dev The PUT leg of the write path: cash cover, `poolCash`, and `collateralFor`'s Ceil.
+    function test_buy_putLocksQuoteCashInThePool() public {
+        uint256 id = _putSeries();
+        _ship(maker, address(usdc), 2050e6);
+
+        uint256 prem = _buy(id, 10e18, buyer);
+
+        assertEq(app.getSeries(id).poolCash, 2050e6);
+        assertEq(app.getSeries(id).poolUnderlying, 0);
+        assertEq(usdc.balanceOf(address(app)), 2050e6);
+        // Cover left the wallet; only the premium came back.
+        assertEq(usdc.balanceOf(maker), prem);
+        assertEq(app.written(id, maker), 10e18);
+    }
+}

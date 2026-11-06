@@ -1,10 +1,16 @@
 // SPDX-License-Identifier: MIT
 pragma solidity 0.8.30;
 
+import { AquaApp } from "@1inch/aqua/contracts/AquaApp.sol";
+import { IAqua } from "@1inch/aqua/contracts/interfaces/IAqua.sol";
+import { IERC20Metadata } from "@openzeppelin/contracts/token/ERC20/extensions/IERC20Metadata.sol";
 import { FixedPointMathLib as F } from "solady/utils/FixedPointMathLib.sol";
 import { LibString } from "solady/utils/LibString.sol";
 
 import { OptionToken, OptionTokenFactory } from "./OptionToken.sol";
+import { IGapOptionCallback } from "./interfaces/IGapOptionCallback.sol";
+import { IPriceOracle } from "./interfaces/IPriceOracle.sol";
+import { GapPricing } from "./lib/GapPricing.sol";
 
 /// @notice CALL (writer locks underlying) or PUT (writer locks quote). Order matches
 /// `GapPricing.CALL` (0) / `GapPricing.PUT` (1).
@@ -20,8 +26,24 @@ enum Kind {
 ///
 /// Units: underlying and option amounts are 18 decimals. `strike` and every oracle price are
 /// quote-token units (6 dp USDC) per 1e18 of underlying.
-contract WeekendOptions {
+contract WeekendOptions is AquaApp {
     // ---------------------------------------------------------------- types
+
+    /// @notice A maker's option-writing strategy. Field order is load-bearing: `hashStrategy`
+    /// is `keccak256(abi.encode(s))` and must equal the hash Aqua derives from the identical
+    /// bytes the maker passes to `AQUA.ship`.
+    ///
+    /// There is deliberately no pool id or decimals here — the oracle owns pool configuration,
+    /// so two makers quoting the same series differ only by `volWad`. Implied vol is the
+    /// competitive axis, exactly as on a real options book.
+    struct Strategy {
+        address app;
+        address maker;
+        address underlying;
+        address quote;
+        uint256 volWad;
+        bytes32 salt;
+    }
 
     struct Series {
         address underlying;
@@ -51,6 +73,11 @@ contract WeekendOptions {
     /// @notice The single quote asset every series' PUT side locks (the USDC-equivalent).
     address public immutable quote;
     OptionTokenFactory public immutable tokenFactory;
+    IPriceOracle public immutable oracle;
+
+    /// @dev One whole unit of the quote token (1e6 for USDC). The only bridge between the
+    /// protocol's quote units and `GapPricing`'s WAD.
+    uint256 internal immutable quoteUnit;
 
     Series[] internal _series;
     mapping(bytes32 => uint256) public seriesIdOf; // key => id + 1
@@ -62,6 +89,10 @@ contract WeekendOptions {
         uint256 indexed seriesId, address indexed underlying, uint64 expiry, Kind kind, uint256 strike, address token
     );
 
+    event OptionWritten(
+        uint256 indexed seriesId, address indexed to, address indexed maker, uint256 amount, uint256 premium
+    );
+
     // ---------------------------------------------------------------- errors
 
     error BadSeries();
@@ -69,10 +100,17 @@ contract WeekendOptions {
     error NotExpired();
     error AlreadySettled();
     error BadAmount();
+    error NotThisApp();
+    error PremiumTooHigh();
+    error InsufficientMakerCollateral();
+    error StrategyMismatch();
+    error NoPrice();
 
-    constructor(address quote_, OptionTokenFactory factory_) {
+    constructor(address quote_, OptionTokenFactory factory_, IAqua aqua_, IPriceOracle oracle_) AquaApp(aqua_) {
         quote = quote_;
         tokenFactory = factory_;
+        oracle = oracle_;
+        quoteUnit = 10 ** IERC20Metadata(quote_).decimals();
         tokenFactory.bind(address(this));
     }
 
@@ -121,5 +159,146 @@ contract WeekendOptions {
         Series storage s = _series[id];
         if (s.kind == Kind.CALL) return (s.underlying, amount);
         return (quote, F.fullMulDivUp(amount, s.strike, 1e18));
+    }
+
+    // ---------------------------------------------------------------- quoting
+
+    /// @notice Strategy hash == the raw bytes Aqua hashes in `ship`.
+    function hashStrategy(Strategy calldata s) public pure returns (bytes32) {
+        return keccak256(abi.encode(s));
+    }
+
+    /// @notice Black-Scholes premium for `amount` options of `seriesId`, in quote-token units.
+    /// @dev `GapPricing` is WAD-native, so the oracle spot and the series strike (both quote
+    /// units) are widened to WAD on the way in and the result is narrowed back on the way out.
+    /// A `view` probe, so `secondsToExpiry` floors at 0 instead of underflowing once the series
+    /// has expired; `buyOption` separately refuses an expired series.
+    function quotePremium(Strategy calldata s, uint256 seriesId, uint256 amount) public view returns (uint256) {
+        Series storage ser = _series[seriesId];
+        (uint256 spotQuote,) = oracle.spot(ser.underlying);
+
+        uint256 spotWad = _toWad(spotQuote);
+        uint256 strikeWad = _toWad(ser.strike);
+        uint256 tte = ser.expiry > block.timestamp ? ser.expiry - block.timestamp : 0;
+
+        uint256 premWad = ser.kind == Kind.CALL
+            ? GapPricing.call(spotWad, strikeWad, tte, s.volWad)
+            : GapPricing.put(spotWad, strikeWad, tte, s.volWad);
+
+        return _fromWad(F.mulWad(premWad, amount));
+    }
+
+    /// @notice How much `token` collateral a maker can ACTUALLY honour under this strategy.
+    /// @dev The `min` is the whole point of this function.
+    ///
+    /// `AQUA.ship` only writes an accounting entry. No ERC-20 moves at ship time — the tokens
+    /// leave the maker's own wallet later, when this app calls `AQUA.pull` inside `buyOption`.
+    /// So the two numbers below are independent and can disagree: a maker can be fully
+    /// committed on Aqua's books and broke in their wallet. Solvency is therefore the MINIMUM
+    /// of the promise and the means, never either one alone.
+    /// @return committed Collateral committed to this strategy on Aqua's books.
+    /// @return wallet The maker's actual `token` wallet balance.
+    /// @return backable min(committed, wallet) — what a buy can really pull.
+    function makerCapacity(Strategy calldata s, address token)
+        public
+        view
+        returns (uint256 committed, uint256 wallet, uint256 backable)
+    {
+        (uint248 raw,) = AQUA.rawBalances(s.maker, address(this), hashStrategy(s), token);
+        committed = raw;
+        wallet = IERC20Metadata(token).balanceOf(s.maker);
+        backable = committed < wallet ? committed : wallet;
+    }
+
+    // ---------------------------------------------------------------- write path
+
+    /// @dev `buyOption`'s arguments, packed to keep its stack shallow (no via_ir in this build).
+    struct BuyArgs {
+        uint256 seriesId;
+        uint256 amount;
+        uint256 maxPremium;
+        address to;
+    }
+
+    /// @notice Write `amount` options of `seriesId` against the maker's shipped cover.
+    /// @dev The caller must implement `IGapOptionCallback`: the premium is collected by calling
+    /// back into `msg.sender`, which pushes it into the maker's Aqua balance (see `WeekendTaker`).
+    ///
+    /// Operational note for makers: `AQUA.push` only lands on a token that is part of the
+    /// shipped strategy, so a CALL maker must include the quote token in `ship` (an amount of 0
+    /// is fine) or the premium leg reverts `PushToNonActiveStrategyPrevented`.
+    function buyOption(
+        Strategy calldata s,
+        uint256 seriesId,
+        uint256 amount,
+        uint256 maxPremium,
+        address to,
+        bytes calldata takerData
+    ) external nonReentrantStrategy(s.maker, hashStrategy(s)) returns (uint256 premium) {
+        return _buyOption(s, BuyArgs(seriesId, amount, maxPremium, to), takerData);
+    }
+
+    function _buyOption(Strategy calldata s, BuyArgs memory a, bytes calldata takerData)
+        internal
+        returns (uint256 premium)
+    {
+        if (s.app != address(this)) revert NotThisApp();
+        if (a.amount == 0) revert BadAmount();
+
+        if (a.seriesId >= _series.length) revert BadSeries();
+        Series storage ser = _series[a.seriesId];
+        if (s.underlying != ser.underlying || s.quote != quote) revert StrategyMismatch();
+        if (block.timestamp >= ser.expiry) revert Expired();
+
+        // `oracle.spot` answers (0, 0) for an unconfigured or uninitialised pool rather than
+        // reverting (Task 3, for the settlement grace path). Here that silence would price
+        // every call at zero and hand out free options against the maker's cover, so the write
+        // path refuses it. `quotePremium` stays a non-reverting probe.
+        (uint256 spotQuote,) = oracle.spot(ser.underlying);
+        if (spotQuote == 0) revert NoPrice();
+
+        premium = quotePremium(s, a.seriesId, a.amount);
+        if (premium > a.maxPremium) revert PremiumTooHigh();
+
+        (address token, uint256 need) = collateralFor(a.seriesId, a.amount);
+        // Solvency BEFORE the pull: a maker whose wallet has been drained since shipping must
+        // fail here, legibly, instead of deep inside Aqua with `ERC20InsufficientBalance`.
+        (,, uint256 backable) = makerCapacity(s, token);
+        if (backable < need) revert InsufficientMakerCollateral();
+
+        // Effects.
+        if (ser.kind == Kind.CALL) ser.poolUnderlying += need;
+        else ser.poolCash += need;
+        ser.totalWritten += a.amount;
+        written[a.seriesId][s.maker] += a.amount;
+
+        // Interactions: take the cover, mint the option, collect the premium.
+        bytes32 hash = hashStrategy(s);
+        AQUA.pull(s.maker, hash, token, need, address(this));
+        ser.token.mint(a.to, a.amount);
+        _collectPremium(s.maker, hash, premium, a.to, takerData);
+
+        emit OptionWritten(a.seriesId, a.to, s.maker, a.amount, premium);
+    }
+
+    /// @dev Invoke the taker callback to push the premium, then verify the push landed.
+    /// The snapshot is taken AFTER `AQUA.pull`: on a PUT the pull drains the very same quote
+    /// balance, so a snapshot taken earlier would demand the taker refund the cover too.
+    function _collectPremium(address maker, bytes32 hash, uint256 premium, address to, bytes calldata takerData)
+        internal
+    {
+        (uint256 quoteBalBeforePush,) = AQUA.rawBalances(maker, address(this), hash, quote);
+        IGapOptionCallback(msg.sender).gapOptionCallback(to, quote, premium, takerData);
+        _safeCheckAquaPush(maker, hash, quote, quoteBalBeforePush + premium);
+    }
+
+    /// @dev quote units -> WAD.
+    function _toWad(uint256 x) internal view returns (uint256) {
+        return F.fullMulDiv(x, 1e18, quoteUnit);
+    }
+
+    /// @dev WAD -> quote units.
+    function _fromWad(uint256 x) internal view returns (uint256) {
+        return F.fullMulDiv(x, quoteUnit, 1e18);
     }
 }

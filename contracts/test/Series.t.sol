@@ -3,7 +3,10 @@ pragma solidity 0.8.30;
 
 import { Test } from "forge-std/Test.sol";
 
+import { IAqua } from "@1inch/aqua/contracts/interfaces/IAqua.sol";
+
 import { Kind, WeekendOptions } from "../src/WeekendOptions.sol";
+import { IPriceOracle } from "../src/interfaces/IPriceOracle.sol";
 import { OptionToken, OptionTokenFactory } from "../src/OptionToken.sol";
 import { MockERC20 } from "../src/mocks/MockERC20.sol";
 
@@ -18,7 +21,9 @@ contract SeriesTest is Test {
         usdc = new MockERC20("USD Coin", "USDC", 6);
         nvdax = new MockERC20("NVDA xStock", "NVDAx", 18);
         OptionTokenFactory factory = new OptionTokenFactory();
-        app = new WeekendOptions(address(usdc), factory);
+        // The registry half reads neither Aqua nor the oracle; the write path (Write.t.sol)
+        // exercises both against the real contracts.
+        app = new WeekendOptions(address(usdc), factory, IAqua(address(0)), IPriceOracle(address(0)));
         expiry = uint64(block.timestamp + 1 days);
     }
 
