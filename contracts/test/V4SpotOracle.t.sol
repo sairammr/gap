@@ -70,4 +70,22 @@ contract V4SpotOracleTest is Test {
         assertEq(p, 0);
         assertEq(at, 0);
     }
+
+    /// @dev Ruling 3: the "already recorded" guard must be independent of whether the recorded
+    ///      price is zero. If the pool reads zero at settlement time (e.g. uninitialised), the
+    ///      slot must still be permanently recorded (never re-recordable) while `settlementPrice`
+    ///      keeps reporting `ok = false` for it, so Task 7's grace-period path can fall through.
+    ///      A naive guard derived from `settlement[asset][expiry] != 0` would let this slot be
+    ///      recorded over and over, since a zero price never trips it.
+    function test_recordSettlement_zeroPriceStaysRecordedAndUnexercisable() public {
+        stateView.setSqrtPriceX96(0);
+        vm.warp(expiry);
+        oracle.recordSettlement(address(nvdax), expiry);
+
+        (, bool ok) = oracle.settlementPrice(address(nvdax), expiry);
+        assertFalse(ok);
+
+        vm.expectRevert(V4SpotOracle.AlreadyRecorded.selector);
+        oracle.recordSettlement(address(nvdax), expiry);
+    }
 }
