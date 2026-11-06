@@ -9,6 +9,12 @@ evm_version = "cancun"
 optimizer = true
 optimizer_runs = 1000
 via_ir = false
+# forge-std ships its own `contract MockERC20` at a path ending in
+# `src/mocks/MockERC20.sol`, which collides by artifact name with our
+# `src/mocks/MockERC20.sol`. forge's cheatcode artifact resolver matches by
+# path suffix, so `new MockERC20(...)` becomes an ambiguous deployCode/getCode
+# lookup. Skip the unused forge-std mocks so only our MockERC20 artifact exists.
+skip = ["*/forge-std/src/mocks/*"]
 fs_permissions = [{ access = "read-write", path = "./deployments" }]
 remappings = [
   "forge-std/=node_modules/@uniswap/v4-core/lib/forge-std/src/",
