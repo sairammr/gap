@@ -75,8 +75,18 @@ contract WeekendPricer is IStaticExtruction {
     /// The floor is bps of the strike notional, which is dimensionally the same thing the
     /// premium is (quote units per 1e18 options). Credit: found in the core write path, which
     /// is exposed to the identical attack through `buyOption`.
-    function premiumFloor(uint256 strike, uint16 minPremiumBps) public pure returns (uint256) {
-        return (strike * minPremiumBps) / 10_000;
+    /// @dev Takes the trade's full option `amount` rather than flooring per option and
+    ///      scaling. Those are not the same number: flooring first and scaling after loses up
+    ///      to a unit per option, which at size diverges by hundreds. A quote priced at exactly
+    ///      a per-option floor would then sit below the core's trade-level floor and
+    ///      `buyOption` would reject an order this contract had just accepted. One flooring,
+    ///      one definition, no reconciliation. Mirrors the core's `buyOption` floor exactly.
+    function premiumFloor(uint256 amount, uint256 strike, uint16 minPremiumBps)
+        public
+        pure
+        returns (uint256)
+    {
+        return ((amount * strike) / 1e18 * minPremiumBps) / 10_000;
     }
 
     /// @notice Premium for one series, in quote-token units per 1e18 options.
@@ -84,11 +94,7 @@ contract WeekendPricer is IStaticExtruction {
     /// the maker's own number and the only axis two makers quoting the same series differ on; a
     /// maker running both sides simply ships a higher vol on their ask order than on their bid,
     /// which is their spread. No separate spread parameter exists, deliberately.
-    function premiumPerOption(uint256 seriesId, uint256 volWad, uint16 minPremiumBps)
-        public
-        view
-        returns (uint256)
-    {
+    function premiumPerOption(uint256 seriesId, uint256 volWad) public view returns (uint256) {
         WeekendOptions.Series memory s = APP.getSeries(seriesId);
         if (block.timestamp >= s.expiry) revert SeriesExpired(s.expiry);
 
@@ -104,12 +110,12 @@ contract WeekendPricer is IStaticExtruction {
 
         uint256 premium = premWad / QUOTE_TO_WAD;
 
-        // Unconditional, then the maker's own floor. Both are needed: the first stops the
-        // deep-out-of-the-money zero, the second stops dust, and a maker setting
-        // `minPremiumBps = 0` must not re-open the first.
+        // Load-bearing on its own, and deliberately NOT folded into the floor check below:
+        // the floor is quote-unit output, so at small size it floors to 0 and would wave a
+        // dust premium straight through. `GapPricing.normalCdf` is exactly 0 beyond -8 sigma,
+        // so a far enough strike prices at exactly 0 and a no-op taker would take the maker's
+        // whole cover for nothing.
         if (premium == 0) revert ZeroPremium();
-        uint256 floor = premiumFloor(s.strike, minPremiumBps);
-        if (premium < floor) revert PremiumBelowFloor(premium, floor);
 
         return premium;
     }
@@ -130,6 +136,7 @@ contract WeekendPricer is IStaticExtruction {
 
         SwapRegisters memory out = swap;
         _fillMissingLeg(out, side, query.isExactIn, premium);
+        _enforceFloor(out, side, args);
 
         return (nextPC, 0, out);
     }
@@ -148,8 +155,22 @@ contract WeekendPricer is IStaticExtruction {
         (seriesId, volWad, minPremiumBps, side) = abi.decode(args, (uint256, uint256, uint16, uint8));
 
         _gateDirection(side, query, address(APP.getSeries(seriesId).token));
-        // Reverts on a zero or below-floor premium; nothing downstream may see a dust price.
-        premium = premiumPerOption(seriesId, volWad, minPremiumBps);
+        premium = premiumPerOption(seriesId, volWad);
+        minPremiumBps; // consumed by `_enforceFloor`, which re-reads it from calldata
+    }
+
+    /// @dev The maker's floor, applied to the finished trade.
+    ///
+    ///      Ask side only, because that is where the exposure is: the maker hands out option
+    ///      tokens and receives quote, so too low a price drains their shipped cover. On the
+    ///      bid side the maker is paying, and a floor there would be a ceiling on their own
+    ///      bid -- the taker is the one at risk and SwapVM already enforces their `minOut`
+    ///      threshold after the program runs.
+    function _enforceFloor(SwapRegisters memory out, uint8 side, bytes calldata args) private view {
+        if (side != SIDE_ASK) return;
+        (uint256 seriesId,, uint16 minPremiumBps,) = abi.decode(args, (uint256, uint256, uint16, uint8));
+        uint256 floor = premiumFloor(out.amountOut, APP.getSeries(seriesId).strike, minPremiumBps);
+        if (out.amountIn < floor) revert PremiumBelowFloor(out.amountIn, floor);
     }
 
     /// @dev Fills whichever amount register the taker did not specify.

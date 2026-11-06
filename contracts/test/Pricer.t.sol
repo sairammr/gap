@@ -104,7 +104,7 @@ contract PricerTest is Test {
     // ------------------------------------------------------------------ pricing
 
     function test_atTheMoneyCallIsWorthMoreThanZeroAndLessThanSpot() public view {
-        uint256 p = pricer.premiumPerOption(callId, VOL, MIN_BPS);
+        uint256 p = pricer.premiumPerOption(callId, VOL);
         assertGt(p, 0, "ATM call must have time value");
         assertLt(p, 205e6, "a call can never be worth more than the spot");
     }
@@ -112,19 +112,19 @@ contract PricerTest is Test {
     function test_higherVolCostsMore() public view {
         // Implied vol is the only axis two makers quoting the same series differ on, so this
         // monotonicity is what makes the cheapest-maker competition meaningful.
-        assertGt(pricer.premiumPerOption(callId, 0.9e18, MIN_BPS), pricer.premiumPerOption(callId, 0.3e18, MIN_BPS));
+        assertGt(pricer.premiumPerOption(callId, 0.9e18), pricer.premiumPerOption(callId, 0.3e18));
     }
 
     function test_premiumRevertsOnceExpired() public {
         vm.warp(expiry);
         vm.expectRevert(abi.encodeWithSelector(WeekendPricer.SeriesExpired.selector, expiry));
-        pricer.premiumPerOption(callId, VOL, MIN_BPS);
+        pricer.premiumPerOption(callId, VOL);
     }
 
     // ------------------------------------------------------------------ ask side
 
     function test_askExactIn_quoteBuysOptionsAtThePremium() public view {
-        uint256 premium = pricer.premiumPerOption(callId, VOL, MIN_BPS);
+        uint256 premium = pricer.premiumPerOption(callId, VOL);
         uint256 spend = 100e6; // 100 USDC
 
         (,, SwapRegisters memory out) = pricer.extruction(
@@ -136,7 +136,7 @@ contract PricerTest is Test {
     }
 
     function test_askExactOut_roundsTheMakerSReceiptUp() public view {
-        uint256 premium = pricer.premiumPerOption(callId, VOL, MIN_BPS);
+        uint256 premium = pricer.premiumPerOption(callId, VOL);
         uint256 want = 1e18 + 1; // deliberately not a round number of options
 
         (,, SwapRegisters memory out) = pricer.extruction(
@@ -150,7 +150,7 @@ contract PricerTest is Test {
     // ------------------------------------------------------------------ bid side
 
     function test_bidExactIn_optionsSellBackForQuote() public view {
-        uint256 premium = pricer.premiumPerOption(callId, VOL, MIN_BPS);
+        uint256 premium = pricer.premiumPerOption(callId, VOL);
         uint256 give = 3e18; // 3 options
 
         (,, SwapRegisters memory out) = pricer.extruction(
@@ -164,8 +164,8 @@ contract PricerTest is Test {
         // A maker running both sides ships a higher vol on the ask than the bid; that gap is the
         // spread. Nothing else in the system enforces one, so this is the only thing standing
         // between a two-sided maker and being arbitraged flat.
-        uint256 ask = pricer.premiumPerOption(callId, 0.6e18, MIN_BPS);
-        uint256 bid = pricer.premiumPerOption(callId, 0.4e18, MIN_BPS);
+        uint256 ask = pricer.premiumPerOption(callId, 0.6e18);
+        uint256 bid = pricer.premiumPerOption(callId, 0.4e18);
         assertGt(ask, bid);
     }
 
@@ -173,41 +173,58 @@ contract PricerTest is Test {
 
     function test_deepOutOfTheMoneyPricesToZeroAndIsRefused() public {
         // `normalCdf` is exactly 0 beyond -8 sigma, so a far enough strike prices at exactly 0.
-        // Without this guard a taker drains the maker's whole shipped cover into a worthless
-        // series for nothing.
+        // Without this guard a taker drains the maker's whole shipped cover for nothing.
         uint256 farId = app.createSeries(address(nvdax), expiry, Kind.CALL, 100_000e6);
         vm.expectRevert(WeekendPricer.ZeroPremium.selector);
-        pricer.premiumPerOption(farId, VOL, 0);
+        pricer.premiumPerOption(farId, VOL);
     }
 
-    function test_dustPremiumIsRefusedEvenWhenNonZero() public {
-        // A nonzero-but-tiny premium is the same attack with an extra step: `amountOut` is
-        // `amountIn * 1e18 / premium`, so dust buys the maker's entire inventory.
-        uint256 farId = app.createSeries(address(nvdax), expiry, Kind.CALL, 1_200e6);
-        uint256 raw = 0;
-        try pricer.premiumPerOption(farId, VOL, 0) returns (uint256 p) {
-            raw = p;
-        } catch {
-            return; // already zero-refused; the floor has nothing left to catch
-        }
-        uint16 bps = uint16(((raw * 10_000) / 1_200e6) + 1); // a floor just above the real price
+    function test_floorIsOneFlooringOnTheTradeTotal() public view {
+        // Flooring per option and scaling after is NOT the same number: it loses up to a unit
+        // per option and diverges by hundreds at size, which would let this contract accept a
+        // quote the core then rejects. One flooring, on the totals.
+        uint256 amount = 100e18;
+        uint256 strike = 205_009_999;
+        uint256 perOptionThenScale = ((strike * 1) / 10_000) * amount / 1e18;
+        assertEq(pricer.premiumFloor(amount, strike, 1), 2_050_099);
+        assertEq(perOptionThenScale, 2_050_000);
+        assertGt(pricer.premiumFloor(amount, strike, 1), perOptionThenScale);
+    }
+
+    function test_askBelowTheMakersFloorIsRefused() public {
+        uint256 premium = pricer.premiumPerOption(callId, VOL);
+        uint256 spend = 100e6;
+        uint256 optionsOut = (spend * 1e18) / premium;
+        // A floor set just above what this trade actually pays.
+        uint16 bps = uint16(((spend * 10_000) / ((optionsOut * STRIKE) / 1e18)) + 1);
+
         vm.expectRevert(
             abi.encodeWithSelector(
-                WeekendPricer.PremiumBelowFloor.selector, raw, pricer.premiumFloor(1_200e6, bps)
+                WeekendPricer.PremiumBelowFloor.selector, spend, pricer.premiumFloor(optionsOut, STRIKE, bps)
             )
         );
-        pricer.premiumPerOption(farId, VOL, bps);
+        pricer.extruction(
+            true, 7, _query(address(usdc), optionToken, true), _regs(spend, 0),
+            abi.encode(callId, VOL, bps, ASK), ""
+        );
     }
 
-    function test_floorIsBpsOfStrikeNotional() public view {
-        // Dimensionally the same units as the premium: quote units per 1e18 options.
-        assertEq(pricer.premiumFloor(205e6, 100), 2_050_000); // 1% of 205 USDC
-        assertEq(pricer.premiumFloor(205e6, 0), 0);
+    function test_bidIsNotFloored_theTakerSThresholdGuardsThatSide() public view {
+        // A floor on the bid would be a ceiling on the maker's own bid. The taker is the one
+        // at risk there, and SwapVM enforces their minOut after the program runs.
+        (,, SwapRegisters memory out) = pricer.extruction(
+            true, 7, _query(optionToken, address(usdc), true), _regs(3e18, 0),
+            abi.encode(callId, VOL, uint16(9_999), BID), ""
+        );
+        assertGt(out.amountOut, 0, "an absurd bps must not block the bid side");
     }
 
-    function test_anHonestAtTheMoneyPremiumClearsAReasonableFloor() public view {
-        // 1% of strike — the ATM premium must survive it, or the floor is unusable.
-        assertGt(pricer.premiumPerOption(callId, VOL, 100), 0);
+    function test_anHonestAtTheMoneyAskClearsAReasonableFloor() public view {
+        (,, SwapRegisters memory out) = pricer.extruction(
+            true, 7, _query(address(usdc), optionToken, true), _regs(100e6, 0),
+            abi.encode(callId, VOL, uint16(100), ASK), ""
+        );
+        assertGt(out.amountOut, 0);
     }
 
     // ------------------------------------------------------------------ the gate
