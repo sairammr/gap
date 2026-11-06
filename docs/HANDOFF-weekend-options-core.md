@@ -22,8 +22,12 @@ pulls the cover at fill time and mints option tokens → `exercise` (American, p
 **reads no oracle**) or `close` (writer unwind) → `settle` (one oracle read) →
 `redeem` / `claim`, both with permissionless `…For` keeper variants.
 
-Tests: 100/100 with `--skip test/Desk.t.sol` (peer-owned, see *Known breakage*).
-`WeekendOptions` runtime 17,061 B against the 24,576 B ceiling.
+Tests: **123/123, nothing skipped**, plus 43 integration tests against the real router owned
+by the trading layer. `WeekendOptions` runtime 17,061 B against the 24,576 B ceiling.
+
+The full lifecycle has been run on chain by the trading-layer session — buy, sell-back,
+exercise, a real expiry wait, settle, redeem, claim — and the protocol drained to 0 USDC and
+0 NVDAx after `claimFor`, verified by live reads.
 
 ## Open security items
 
@@ -150,9 +154,6 @@ for every arithmetic test).
 
 ## Known breakage and loose ends
 
-- **`contracts/test/Desk.t.sol` does not compile.** Adding `Strategy.maxSecondsToExpiry` broke
-  its struct literal. One-line fix: add a value between `minPremiumBps` and `salt`.
-  `contracts/test/helpers/DeskFixture.sol` has the same latent break. Owner notified.
 - **The final fix wave has no clean commit.** Peer sessions ran broad `git add` mid-edit and
   swept it into `1e45cb7` and `b47a83c` under unrelated messages. The changes are present and
   verified per-file; rewriting already-synced shared history was declined. To see them as a
@@ -169,7 +170,26 @@ for every arithmetic test).
   rename (`IGapOptionCallback`, `gapOptionCallback`, `GapPricing` survive — `gapOptionCallback`
   is in the integration surface external takers implement, so renaming later is breaking).
 
-## One concern raised and cleared
+## Two economic limits found on a live run
+
+Neither is a code bug. Both are the pricing model meeting a tenor it was not calibrated for,
+and both constrain how the core's parameters can actually be set. Written up in spec §12.6c by
+the trading-layer session; repeated here because they are properties of `quotePremium` and
+`_premiumFloor`, which live in this file.
+
+1. **A constant `minPremiumBps` is unusable on short tenors.** 25 bps of strike notional
+   exceeds a 15-minute option's entire time value, so a maker's own quote reverts against their
+   own floor. The live run had to ship at **1 bp**. The floor is flat while time value is not,
+   so the two cross somewhere — and for weekend-length series that crossing point is inside the
+   product's normal operating range. If `minPremiumBps` ever grows a tenor term, this is the
+   case for it.
+
+2. **The vol-only spread collapses to zero on ITM short-dated series.** Ask vol `0.6` and bid
+   vol `0.4` both priced a live series at exactly `5000000`, making the buy→sell round trip
+   free. Deep enough ITM, the premium is intrinsic and intrinsic has no vol sensitivity, so
+   `volWad` — the maker's only economic lever — stops being a lever at all. This is the same
+   root as the `maxMoneynessBps` discussion above, seen from the maker's side rather than the
+   attacker's.
 
 `GapPricing.put` is `call + strike − spot` and `call()` is an Abramowitz–Stegun approximation,
 so a deep-ITM call returning slightly less than intrinsic would underflow and brick
