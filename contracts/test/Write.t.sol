@@ -76,6 +76,7 @@ contract WriteTest is Test {
             quote: address(usdc),
             volWad: VOL,
             minPremiumBps: floorBps,
+            maxSecondsToExpiry: 30 days,
             salt: bytes32(0)
         });
     }
@@ -340,6 +341,7 @@ contract WriteTest is Test {
             quote: address(usdc),
             volWad: VOL,
             minPremiumBps: 0,
+            maxSecondsToExpiry: 30 days,
             salt: bytes32(0)
         });
         uint256 id = app.createSeries(address(feeToken), expiry, Kind.CALL, STRIKE);

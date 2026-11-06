@@ -47,6 +47,12 @@ contract WeekendOptions is AquaApp {
         address quote;
         uint256 volWad;
         uint16 minPremiumBps;
+        // Rider D: the per-maker bound on how far out a series' expiry may be at buy time.
+        // `Strategy` binds no series/strike/expiry and `createSeries` is permissionless out to
+        // 400 days, so without this a maker's weekend-calibrated vol could be applied to a
+        // series an attacker opens far in the future, locking the maker's cover for over a year
+        // against a premium priced for a two-day tenor. Enforced in `_buyOption`.
+        uint64 maxSecondsToExpiry;
         bytes32 salt;
     }
 
@@ -102,6 +108,8 @@ contract WeekendOptions is AquaApp {
 
     event Closed(uint256 indexed seriesId, address indexed writer, uint256 amount);
 
+    event Settled(uint256 indexed seriesId, uint256 price, uint256 holderUnderlying, uint256 holderCash);
+
     // ---------------------------------------------------------------- errors
 
     error BadSeries();
@@ -120,6 +128,8 @@ contract WeekendOptions is AquaApp {
     error TransferFailed();
     error CloseAfterExercise();
     error ShortPull();
+    error OracleNotReady();
+    error TenorTooLong();
 
     constructor(address quote_, OptionTokenFactory factory_, IAqua aqua_, IPriceOracle oracle_) AquaApp(aqua_) {
         quote = quote_;
@@ -274,6 +284,9 @@ contract WeekendOptions is AquaApp {
         Series storage ser = _series[a.seriesId];
         if (s.underlying != ser.underlying || s.quote != quote) revert StrategyMismatch();
         if (block.timestamp >= ser.expiry) revert Expired();
+        // Rider D: bounds the tenor a maker's shipped vol can be applied to. Safe to subtract
+        // unchecked — the `Expired` check above already guarantees `ser.expiry > block.timestamp`.
+        if (ser.expiry - block.timestamp > s.maxSecondsToExpiry) revert TenorTooLong();
 
         // `oracle.spot` answers (0, 0) for an unconfigured or uninitialised pool rather than
         // reverting (Task 3, for the settlement grace path). Here that silence would price
@@ -450,5 +463,97 @@ contract WeekendOptions is AquaApp {
         require(IERC20Metadata(quote).transfer(msg.sender, outC), TransferFailed());
 
         emit Closed(id, msg.sender, amount);
+    }
+
+    // ---------------------------------------------------------------- settlement
+
+    /// @dev Staged settlement outputs, computed in memory before `_settle`'s storage writes.
+    /// Keeping this off `_settle`'s own stack is what keeps six-plus local writes from tripping
+    /// stack-too-deep under this build's `via_ir = false`.
+    struct SettleResult {
+        uint256 price;
+        uint256 supply;
+        uint256 holderUnderlying;
+        uint256 holderCash;
+    }
+
+    /// @notice After expiry, fix the holder/writer payout split for `id` using the oracle's
+    /// time-weighted settlement price, falling back to spot after a grace window.
+    function settle(uint256 id) external {
+        _settle(id);
+    }
+
+    /// @dev Internal and separately callable so a lazy `redeem`/`claim` (Task 8) can settle a
+    /// series on first touch instead of requiring a separate `settle` call first.
+    ///
+    /// Three behaviours below look like bugs and are not — all three are ported verbatim from
+    /// the source protocol (spec §10) and are load-bearing for Task 8:
+    /// 1. `poolUnderlying`/`poolCash` are never zeroed or decremented here. They go stale the
+    ///    instant `settled` flips true; every payout runs off the six snapshot fields instead.
+    /// 2. The `p > 0` gate means a GENUINE settlement price of exactly 0 still pays PUT holders
+    ///    nothing, even though intrinsic would then be the full strike — zero is overloaded here
+    ///    as "no price", not "worthless underlying".
+    /// 3. The two `min` caps below are applied once, at settle time, not at payout, and they
+    ///    truncate silently.
+    function _settle(uint256 id) internal {
+        if (id >= _series.length) revert BadSeries();
+        Series storage s = _series[id];
+        if (block.timestamp < s.expiry) revert NotExpired();
+        if (s.settled) revert AlreadySettled();
+
+        SettleResult memory r = _resolveSettlement(s);
+
+        // Caps applied at settle, not at payout (behaviour 3 above): a pool partially drained by
+        // exercises before expiry never pays out more than it actually holds.
+        uint256 hU = r.holderUnderlying > s.poolUnderlying ? s.poolUnderlying : r.holderUnderlying;
+        uint256 hC = r.holderCash > s.poolCash ? s.poolCash : r.holderCash;
+
+        s.settled = true;
+        s.settlePrice = r.price;
+        s.supplyAtSettle = r.supply;
+        s.holderUnderlying = hU;
+        s.holderCash = hC;
+        // Exact subtractions (not a second `mulDiv`) against the STILL-STALE pool fields
+        // (behaviour 1 above) — this is spec §10's binding arithmetic, not an approximation.
+        s.writerUnderlying = s.poolUnderlying - hU;
+        s.writerCash = s.poolCash - hC;
+        s.writtenAtSettle = s.totalWritten;
+
+        emit Settled(id, r.price, hU, hC);
+    }
+
+    /// @dev Oracle sequence (spec §10):
+    /// 1. `settlementPrice(underlying, expiry)` → if `ok`, that price wins outright.
+    /// 2. `!ok` and still inside the grace window → the series simply isn't settleable yet.
+    /// 3. `!ok` and past grace → fall back to `spot`, but ONLY if it was published at or after
+    ///    expiry; a spot published before expiry is stale and is rejected (`p` becomes 0, not
+    ///    the stale number).
+    ///
+    /// Then computes the raw (uncapped) holder shares. Every formula here floors
+    /// (`F.fullMulDiv`, never `fullMulDivUp`) — `collateralFor` stays the protocol's only Ceil.
+    function _resolveSettlement(Series storage s) internal view returns (SettleResult memory r) {
+        (uint256 p, bool ok) = oracle.settlementPrice(s.underlying, s.expiry);
+        if (!ok) {
+            if (block.timestamp < s.expiry + SETTLEMENT_GRACE) revert OracleNotReady();
+            (uint256 sp, uint256 updatedAt) = oracle.spot(s.underlying);
+            p = updatedAt >= s.expiry ? sp : 0;
+        }
+
+        uint256 supply = s.token.totalSupply();
+        uint256 hU;
+        uint256 hC;
+        // `p > 0` gates both branches (behaviour 2 on `_settle`): see its natspec.
+        if (p > 0) {
+            if (s.kind == Kind.CALL) {
+                if (p > s.strike) hU = F.fullMulDiv(supply, p - s.strike, p);
+            } else {
+                hC = F.fullMulDiv(supply, s.strike > p ? s.strike - p : 0, 1e18);
+            }
+        }
+
+        r.price = p;
+        r.supply = supply;
+        r.holderUnderlying = hU;
+        r.holderCash = hC;
     }
 }

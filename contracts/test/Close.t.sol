@@ -76,6 +76,7 @@ contract CloseTest is Test {
             quote: address(usdc),
             volWad: VOL,
             minPremiumBps: 0,
+            maxSecondsToExpiry: 30 days,
             salt: bytes32(0)
         });
     }

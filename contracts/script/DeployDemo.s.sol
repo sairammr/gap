@@ -287,6 +287,8 @@ contract DeployDemo is Script {
             quote: address(usdc),
             volWad: VOL_SELF,
             minPremiumBps: 0,
+            // Rider D (Task 7): no particular bound is meaningful for a one-off demo deploy.
+            maxSecondsToExpiry: type(uint64).max,
             salt: bytes32(0)
         });
     }
