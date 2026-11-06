@@ -288,7 +288,23 @@ is recorded rather than patched:
    exercise in the series.
 
 A fix that is exactly fair needs each writer's entry state recorded, which is real complexity.
-Until this is decided, treat `close` on a series that has taken exercises as live.
+
+**DECIDED: option 2.** Bar `close` once the opposite leg is non-empty — `poolCash != 0` on a
+CALL, `poolUnderlying != 0` on a PUT. Reasons, in order:
+
+- It is the only candidate with no residual unfairness. Option 1 just points the asymmetry the
+  other way: a writer whose cover genuinely was exercised gets back less than they put in.
+- The cost is bounded and small *for this product*. It disables early unwind after the first
+  exercise in a series, and these series live hours, not months. A writer who wants out before
+  any exercise still can.
+- It is a few lines, and it fails closed. Option 1 is arithmetic that has to be right.
+
+This diverges from the source protocol, deliberately and in one place. Recorded here rather
+than silently: the source is extractable, and porting a known-extractable path verbatim is not
+fidelity, it is copying a bug.
+
+Until it lands in `close`, treat the path as live. The desk tolerates a reverting or partial
+`close` and keeps the options as inventory instead of failing the fill (§12.6).
 
 ### `SETTLEMENT_GRACE = 7 days`
 
