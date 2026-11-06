@@ -303,6 +303,26 @@ This diverges from the source protocol, deliberately and in one place. Recorded 
 than silently: the source is extractable, and porting a known-extractable path verbatim is not
 fidelity, it is copying a bug.
 
+**The guard is permanent once tripped, by design.** On a CALL only `exercise` credits
+`poolCash`, `close` is the only pre-expiry decrement, and `settle` deliberately never touches
+the pools — so one exercise shuts the extraction path for the life of the series and it cannot
+be reopened. Same shape on the PUT side.
+
+**ACCEPTED COST: this trades a value hole for a bounded liveness one.** Early unwind for every
+writer in a series is now contingent on no holder having exercised. So a holder of a single
+option can exercise a dust amount — `fullMulDivUp` rounds the strike on dust to 1 unit of quote
+— and permanently freeze `close` for every writer in that series, for roughly 1e-6 USDC plus
+whatever they paid to hold the option.
+
+Accepted knowingly, because no value is extracted, writers are still made whole at settle, and
+these series live hours. **This is a new denial path that did not exist before the fix**, and it
+is recorded here so that whoever finds it later reads a decision rather than an oversight.
+
+A third variant was considered and rejected: allow `close` but cap the payout at what the
+closer contributed, in their own leg only. It closes the extraction and has no liveness hole,
+but it silently haircuts a writer whose cover was exercised — a worse surprise than a blocked
+`close`, because it costs money quietly instead of failing loudly.
+
 Until it lands in `close`, treat the path as live. The desk tolerates a reverting or partial
 `close` and keeps the options as inventory instead of failing the fill (§12.6).
 
