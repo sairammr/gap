@@ -166,6 +166,12 @@ contract WeekendPricer is IStaticExtruction {
     ///      bid side the maker is paying, and a floor there would be a ceiling on their own
     ///      bid -- the taker is the one at risk and SwapVM already enforces their `minOut`
     ///      threshold after the program runs.
+    ///
+    ///      This matches the core rather than diverging from it, which is easy to misread the
+    ///      other way: `WeekendOptions.buyOption` has no bid path to floor. The core supports
+    ///      no sell-back and no maker bid, so every call there is a taker lifting a maker's ask
+    ///      against shipped collateral, and its floor is ask-only by construction. The bid side
+    ///      exists only out here, on the SwapVM route.
     function _enforceFloor(SwapRegisters memory out, uint8 side, bytes calldata args) private view {
         if (side != SIDE_ASK) return;
         (uint256 seriesId,, uint16 minPremiumBps,) = abi.decode(args, (uint256, uint256, uint16, uint8));
