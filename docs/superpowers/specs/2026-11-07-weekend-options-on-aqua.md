@@ -150,6 +150,33 @@ implementing this same `IPriceOracle`**. It is a direct answer to this hole:
 
 **This is a port, not a design.** Nobody should re-derive a v4 keeper-median from scratch.
 
+**It is not only a settlement fix — `spot()` prices every fill.** `WeekendOptions.quotePremium`
+and `WeekendPricer.premiumPerOption` both read `oracle.spot()` and feed it straight into
+Black-Scholes. A manipulable `spot()` is therefore a live **entry-path** exposure, separate
+from settlement: depress the pool, buy a CALL whose premium has collapsed, let it recover,
+exercise at the strike. Mirror for a PUT. It is bounded — the premium floor (bps of strike
+notional) and `RequireMinRate` in the SwapVM program backstop it — but `minPremiumBps` tracks
+neither moneyness nor time, so on a deep-ITM series the gap between floor and true value is the
+attacker's margin. The direct `buyOption` path has the floor only, no `RequireMinRate`.
+
+`PythSettlementOracle.spot()` is a Pyth read too, so **one 113-line swap fixes entry pricing,
+fixes settlement, and closes the grace fallback.**
+
+**The installed oracle must answer BOTH methods off-pool, as a single contract.** A split
+deployment — `V4SpotOracle` for `spot()`, Pyth for `settlementPrice()` — hands the pool read
+back to anyone willing to wait out the grace rather than pay for a flash loan.
+
+**HARD CONSTRAINT: `window` must be strictly less than `SETTLEMENT_GRACE`.** Walk `_settle`
+with Pyth installed: `settlementPrice` returns `ok = false` until `now > expiry + window`;
+step 2 reverts `OracleNotReady` only while `now < expiry + GRACE`; step 3 takes an
+instantaneous `spot()` once `now >= expiry + GRACE` and `!ok`. If `window >= GRACE`, the
+interval `(expiry+GRACE, expiry+window]` has `ok` still false and step 2 no longer reverting —
+so **every settle falls through to the single instantaneous read the median exists to
+replace.** No revert, no warning, and `settled` is one-way, so a later correct median cannot
+repair it. `setWindow` is owner-settable, so this is one admin call away. The oracle must
+reject a window `>=` the consuming grace **in both the constructor and `setWindow`** — this is
+an implementation constraint, not a deployer note.
+
 **Residual liveness, stated so it is not a surprise.** If nobody submits a sample inside the
 window, `count == 0` → `ok = false` → the §10 grace path → worthless settlement. That is the
 same failure mode the grace path already has, 7 days wide, and the actor is any permissionless
@@ -215,9 +242,12 @@ the protocol. The port kept the manipulable `slot0` reader and cut the hardened 
 protocol being ported actually used. Deploying against `V4SpotOracle` as it stands is the
 accepted-unbounded-loss case, and §4 decides against accepting it.
 
-> Adopting it also pulls in corporate-action multipliers, listed below as out of scope — the
-> oracle carries the xStock multiplier so dividends and splits do not break open positions.
-> That is a free acquisition, not extra work.
+> **Supersedes two entries in the out-of-scope list below, not one.** `PythSettlementOracle`
+> is both a Pyth oracle and the carrier of `multiplierSource` / `IMultiplierToken` for
+> dividends and splits. Both `Pyth` and `corporate-action multipliers` are superseded by this
+> prerequisite. Recorded as an explicit supersession rather than a quiet deletion, because §7
+> exists precisely to record deliberate drops — and the multipliers arrive free, not as extra
+> work.
 
 **Deferred, not cut:** signed EIP-712 RFQ (a second fill path beside the book, with its own
 typehash/nonce/cancellation surface), and sell-to-open.

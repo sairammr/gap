@@ -14,7 +14,10 @@ via_ir = false
 # `src/mocks/MockERC20.sol`. forge's cheatcode artifact resolver matches by
 # path suffix, so `new MockERC20(...)` becomes an ambiguous deployCode/getCode
 # lookup. Skip the unused forge-std mocks so only our MockERC20 artifact exists.
-skip = ["*/forge-std/src/mocks/*"]
+# The default profile compiles all of test/, but the integration tests import `swapvm/`,
+# which only resolves under [profile.swapvm]. Without this skip, `forge test` is broken
+# repo-wide for every agent, on files they do not own.
+skip = ["*/forge-std/src/mocks/*", "test/integration/*", "test/helpers/DeskFixture.sol"]
 fs_permissions = [{ access = "read-write", path = "./deployments" }]
 remappings = [
   "forge-std/=node_modules/@uniswap/v4-core/lib/forge-std/src/",
@@ -45,6 +48,9 @@ base = "${BASE_RPC_URL}"
 base_sepolia = { key = "${ETHERSCAN_API_KEY}", chain = 84532 }
 
 [profile.swapvm]
+# Must be RE-STATED: a profile inherits the default's `skip`, so omitting this silently runs
+# zero integration tests -- a green run that proves nothing.
+skip = ["*/forge-std/src/mocks/*"]
 # Integration tests against the REAL AquaSwapVMRouter. SwapVM needs viaIR + prague (it does not
 # compile under the default profile), so it gets its own profile rather than slowing every build.
 via_ir = true

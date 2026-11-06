@@ -370,9 +370,20 @@ contract WeekendDesk is IMakerHooks, IGapOptionCallback, Ownable2Step {
     /// transfer (ERC-20 checks the balance even on a self-transfer) and must have approved
     /// Aqua for it. Keep the own-strategy `volWad` low: it only sets how much quote has to sit
     /// idle here, never what anyone pays.
+    /// @dev Tops the Aqua allowance up ONLY when the standing one is short, and tops it up to
+    ///      max rather than to `premiumOwed`.
+    ///
+    ///      Approving exactly `premiumOwed` here is a trap, and it bit once: `AQUA.push` spends
+    ///      the allowance down to exactly zero, which silently destroys the standing max
+    ///      allowance `approveAqua` set. Every later `AQUA.pull` of the quote token then
+    ///      reverts `ERC20InsufficientAllowance`. That kills the bid side of a CALL desk after
+    ///      its first ask fill, and the ask side of a PUT desk outright, since there the cover
+    ///      itself is quote. Found by the first real-router integration run.
     function gapOptionCallback(address, address quoteToken, uint256 premiumOwed, bytes calldata) external {
         if (msg.sender != address(APP)) revert NotApp();
-        IERC20(quoteToken).forceApprove(address(AQUA), premiumOwed);
+        if (IERC20(quoteToken).allowance(address(this), address(AQUA)) < premiumOwed) {
+            IERC20(quoteToken).forceApprove(address(AQUA), type(uint256).max);
+        }
         AQUA.push(address(this), address(APP), ownStrategyHash, quoteToken, premiumOwed);
     }
 }
