@@ -495,9 +495,9 @@ CALL, `poolUnderlying != 0` on a PUT. Reasons, in order:
 
 - It is the only candidate with no residual unfairness. Option 1 just points the asymmetry the
   other way: a writer whose cover genuinely was exercised gets back less than they put in.
-- The cost is bounded and small *for this product*. It disables early unwind after the first
-  exercise in a series, and these series live hours, not months. A writer who wants out before
-  any exercise still can.
+- The cost is bounded and small **provided a maker's exposure is bounded in tenor** — see
+  below. It disables early unwind after the first exercise in a series. A writer who wants out
+  before any exercise still can.
 - It is a few lines, and it fails closed. Option 1 is arithmetic that has to be right.
 
 This diverges from the source protocol, deliberately and in one place. Recorded here rather
@@ -515,8 +515,37 @@ option can exercise a dust amount — `fullMulDivUp` rounds the strike on dust t
 — and permanently freeze `close` for every writer in that series, for roughly 1e-6 USDC plus
 whatever they paid to hold the option.
 
-Accepted knowingly, because no value is extracted, writers are still made whole at settle, and
-these series live hours. **This is a new denial path that did not exist before the fix**, and it
+Accepted knowingly, because no value is extracted and writers are still made whole at settle.
+
+**CORRECTION — the original justification was a premise the contract does not enforce.** This
+decision was first written as bounded because "these series live hours, not months." Nothing
+enforced that. `createSeries` is permissionless out to **400 days** and `Strategy` binds no
+tenor (§4b), so an attacker could mint a 400-day series on the same pair, write into any
+shipped maker's cover, and dust-exercise it — freezing `close` for **400 days, not hours**.
+
+The guard still stands: preventing value extraction dominates a liveness cost. But the stated
+reason read as a property of the product when it was an assumption about how the product would
+be used.
+
+**DECIDED: `Strategy` gains `uint64 maxSecondsToExpiry`,** checked in `_buyOption` against
+`ser.expiry - block.timestamp`, following the existing `minPremiumBps` pattern — maker-set,
+covered by `hashStrategy`, enforced at fill. A maker quoting a weekend vol sets it to a few
+days, and long-dated series become unbuyable against their cover no matter who created them.
+That is the right granularity: each maker's exposure is bounded by their own setting rather
+than by a global rule, and it makes §10's premise true per-maker instead of merely hoped for.
+It also repairs §2.4, which leaned on the same assumption.
+
+**HELD: `uint16 maxMoneynessBps` is NOT added.** After the oracle port, deep-ITM prices at
+roughly intrinsic and carries no skew error, and far-OTM is already covered by
+`minPremiumBps`. A moneyness bound would make fills **spot-dependent at fill time** — a series
+inside the bound one moment is outside it the next on honest drift — which is a new
+intermittent-revert failure mode for honest takers on the SwapVM path. The tenor bound has no
+such property. What remains after the oracle fix is adverse selection on a flat vol surface,
+which is ordinary market-maker risk, answered by a wider `volWad` or by not shipping.
+
+Sequencing: changing `Strategy` changes `hashStrategy` and therefore every shipped strategy
+hash. Nothing is deployed, so this is free today and stays free until something is — no
+deadline, but strictly cheaper before than after. **This is a new denial path that did not exist before the fix**, and it
 is recorded here so that whoever finds it later reads a decision rather than an oversight.
 
 A third variant was considered and rejected: allow `close` but cap the payout at what the
