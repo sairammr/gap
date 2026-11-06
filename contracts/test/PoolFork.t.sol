@@ -41,6 +41,10 @@ contract PoolForkTest is Test {
     // Target spot: 100 USDC per NVDAx. USDC is 6dp, NVDAx is 18dp.
     uint256 internal constant TARGET_SPOT_WAD = 100e18;
 
+    // Expected currency0-branch sqrtPriceX96 for 100 USDC/NVDAx (18dp/6dp) == 2^96 / 1e5.
+    // Matches SQRT_PRICE_100 in BuyOptionPriced.t.sol.
+    uint160 internal constant SQRT_PRICE_100 = 792281625142643375935439;
+
     function test_realPool_initAndReadSpot() public {
         string memory rpc = vm.envOr("BASE_SEPOLIA_RPC_URL", string(""));
         if (bytes(rpc).length == 0) {
@@ -49,6 +53,23 @@ contract PoolForkTest is Test {
         }
         vm.createSelectFork(rpc);
         _runForkBody();
+    }
+
+    /// @notice Offline guard (always runs, no RPC): both sqrtPriceX96 branches round-trip to ~100e18.
+    /// @dev Locks the currency0 scaling against regression independent of the fork's address coin-flip.
+    function test_sqrtPriceForSpot_bothBranches_roundTrip() public pure {
+        bytes32 poolId = bytes32(uint256(1));
+
+        // currency0 branch: must equal 2^96/1e5 and read back ~100e18 (underlying 18dp / quote 6dp).
+        uint160 p0 = _sqrtPriceForSpot(true);
+        assertEq(p0, SQRT_PRICE_100, "c0 sqrtPriceX96 != 2^96/1e5");
+        uint256 spot0 = UniV4Spot.fromSqrtPriceX96(p0, poolId, 18, 6, true);
+        assertApproxEqRel(spot0, TARGET_SPOT_WAD, 1e12, "c0 spot != 100e18");
+
+        // currency1 (inverted) branch: must also read back ~100e18.
+        uint160 p1 = _sqrtPriceForSpot(false);
+        uint256 spot1 = UniV4Spot.fromSqrtPriceX96(p1, poolId, 18, 6, false);
+        assertApproxEqRel(spot1, TARGET_SPOT_WAD, 1e12, "c1 spot != 100e18");
     }
 
     /// @dev Fork body split out of the test so the stack frame stays shallow (via_ir is off).
@@ -127,8 +148,8 @@ contract PoolForkTest is Test {
         uint256 Q96 = 1 << 96;
         uint256 inner;
         if (underlyingIsCurrency0) {
-            // p^2 = spotWad * Q96^2 * 10^6 / (1e18 * 10^18)
-            inner = (TARGET_SPOT_WAD * Q96 / 1e18) * Q96 / 1e18 * (10 ** 6) / (10 ** 18);
+            // p^2 = spotWad * Q96^2 * 10^6 / (1e18 * 10^18); denominator = 10^36.
+            inner = (TARGET_SPOT_WAD * Q96 / 1e18) * Q96 * (10 ** 6) / (10 ** 18);
         } else {
             // p^2 = Q96^2 * 1e18 * 10^18 / (spotWad * 10^6)
             inner = Q96 * Q96 / TARGET_SPOT_WAD * 1e18 / (10 ** 6) * (10 ** 18);
