@@ -8,6 +8,65 @@
 
 ---
 
+## 0. LIVE on Base Sepolia (chain 84532)
+
+**Deployed and verified.** Read addresses from `contracts/deployments/base-sepolia.json` at
+runtime — do not hardcode them; a `Strategy` change is expected to force one redeploy (below).
+
+| contract | address |
+|---|---|
+| `weekendOptions` | `0xfa13A08f960Ce09b5Cc73dc560Eff9d79B980166` |
+| `desk` | `0xde3e63cF9aE0c941AC5B84eA8c8710880F76a66c` |
+| `pricer` | `0x4Dd17D47fF077b39A2D76be8637274efA402ef73` |
+| `oracle` | `0x36a18A29E45D3A35AEBc7E9387C7A3A27247d2ac` |
+| `optionTokenFactory` | `0xba3Df561822A716B1d4bAe5130d1444ebA75Ad0e` |
+| `optionToken` | `0x326f684e7906e3d1B37E1462b1fE62f0561047e0` |
+| `usdc` | `0x682DE63021755a7c75d34BF6Bd1eC289F2546c81` |
+| `nvdax` | `0xA8FE197d0eFe5AfE56bdc5671731eE393032CAf9` |
+| `swapVmRouter` | `0x09235bE12Ab393C8B4343Db8d329F5B29B5F3B72` |
+| `aqua` | `0x1E522b17600Aa9eE58C7633C528cCC19fdcFcd1f` |
+| `stateView` | `0x571291b572ed32ce6751a2Cb2486EbEe8DEfB9B4` |
+| `poolManager` | `0x05E73354cFDd6745C338b50BcFDfA3Aa6fA03408` |
+
+| series 0 | |
+|---|---|
+| `poolId` | `0x06b9bd5f8d33bb585f59884880d0b990e6878dffe81bbcc2589e37c8fa1a6c47` |
+| `seriesId` | `0` |
+| `strike` | `100000000` |
+| `expiry` | `1794603348` |
+| `askStrategyHash` | `0x84a4678648cf4be138f1d3502421355d3c0fb0795065f660eccbc1d33811ed9a` |
+| `ownStrategyHash` | `0xc1847616dab68a254c1fcc83cc36df7a29a24d7a83536eada6b51b1b7ea86dab` |
+| `askSalt` | `0x0000000000000000000000000000000000000000000000000000000000000001` |
+| `askVolWad` | `600000000000000000` |
+
+Live readings at deploy time: `seriesCount() = 1`, an ATM CALL at strike 100 USDC,
+`oracle.spot(nvdax) = 100000000`, `pricer.premiumPerOption(0, 0.6e18) ≈ 3313657`
+(~3.31 USDC/option — it decays every block, so quote immediately before you fill).
+
+### What works live today
+
+`createSeries` · `buyOption` · the full SwapVM ask path through the router · `exercise`
+(physical, **reads no oracle**) · `close`.
+
+### What does NOT work live yet
+
+`settle`, `redeem`, `claim` are **not implemented**. An unexercised option at expiry has no
+payout path. Build the UI for exercise; leave settlement stubbed.
+
+### Two changes that WILL move things
+
+1. **`Strategy` gains `uint64 maxSecondsToExpiry`.** That changes `hashStrategy`, therefore
+   every shipped strategy hash, therefore the deployed addresses. **Expect one redeploy.**
+2. `app/public/deployments/base-sepolia.json` is still stale. The authoritative file is
+   `contracts/deployments/base-sepolia.json`.
+
+### Accepted risk you should not design around
+
+The oracle is manipulable — `V4SpotOracle.recordSettlement` takes an instantaneous `slot0`.
+The user has accepted this (spec §4). Do not build warnings or mitigations into the UI for it.
+
+---
+
 ## 1. What the product is
 
 Fully collateralised options on tokenised stocks (NVDAx), priced in one quote token (USDC).
@@ -55,14 +114,16 @@ Four properties that shape every screen:
 
 | What | Status |
 |---|---|
-| `exercise`, `close`, `settle`, `redeem`/`redeemFor`, `claim`/`claimFor` | **PENDING** — planned signatures in §5. Another agent is writing them now. |
-| `WeekendDesk.sol` (SwapVM maker hooks) | **PENDING** |
-| SwapVM order builders (JS) | **PENDING** |
-| Deploy script for the new contracts | **PENDING** |
+| `exercise`, `close` | **DONE**, live. |
+| `settle`, `redeem`/`redeemFor`, `claim`/`claimFor` | **PENDING** — planned signatures in §5. |
+| `WeekendDesk.sol` (SwapVM maker hooks) | **DONE** — deployed, 23 unit + 37 integration tests |
+| SwapVM order builders (JS) | **DONE** — `sdk/orders.ts`, zero deps, byte-identical to the Solidity encoder |
+| Deploy script for the new contracts | **DONE** — `script/DeployDemo.s.sol`, broadcast |
 
-### Deployment addresses are STALE
+### Deployment addresses — see §0, now LIVE
 
-`contracts/deployments/base-sepolia.json` and `app/public/deployments/base-sepolia.json` both still point at `gapOptionsApp` / `gapTaker` — **a deleted product**. There are no live addresses for `WeekendOptions` yet.
+`contracts/deployments/base-sepolia.json` is current and authoritative.
+`app/public/deployments/base-sepolia.json` is still stale and points at a deleted product.
 
 Expect the JSON to gain roughly: `weekendOptions`, `weekendTaker`, `weekendPricer`, `weekendDesk`, `optionTokenFactory`, `oracle`, plus the existing `aqua`, `swapVmRouter`, `usdc`, `nvdax`, `stateView`, `makers[]`. **Confirm the final key names before wiring.**
 
