@@ -110,6 +110,10 @@ contract WeekendOptions is AquaApp {
 
     event Settled(uint256 indexed seriesId, uint256 price, uint256 holderUnderlying, uint256 holderCash);
 
+    event Redeemed(uint256 indexed seriesId, address indexed holder, uint256 amount, uint256 outU, uint256 outC);
+
+    event WriterClaimed(uint256 indexed seriesId, address indexed writer, uint256 outU, uint256 outC);
+
     // ---------------------------------------------------------------- errors
 
     error BadSeries();
@@ -555,5 +559,88 @@ contract WeekendOptions is AquaApp {
         r.supply = supply;
         r.holderUnderlying = hU;
         r.holderCash = hC;
+    }
+
+    // ---------------------------------------------------------------- payouts
+
+    /// @notice Redeem `amount` of the caller's option tokens for their pro-rata share of the
+    /// post-expiry holder payout. Lazy-settles the series on first touch if nobody called
+    /// `settle` yet.
+    function redeem(uint256 id, uint256 amount) external returns (uint256 outU, uint256 outC) {
+        return _redeem(id, msg.sender, amount);
+    }
+
+    /// @notice Permissionless: pays `holder`'s FULL balance, never the caller's. Lets a keeper
+    /// redeem on behalf of holders who never click anything.
+    function redeemFor(uint256 id, address holder) external returns (uint256 outU, uint256 outC) {
+        uint256 bal = _series[id].token.balanceOf(holder);
+        if (bal == 0) return (0, 0);
+        return _redeem(id, holder, bal);
+    }
+
+    /// @notice One-shot claim of the caller's ENTIRE written position. A second call is a no-op.
+    function claim(uint256 id) external returns (uint256 outU, uint256 outC) {
+        return _claim(id, msg.sender);
+    }
+
+    /// @notice Permissionless: always credits `writer`, never the caller.
+    function claimFor(uint256 id, address writer) external returns (uint256 outU, uint256 outC) {
+        return _claim(id, writer);
+    }
+
+    /// @dev Lazy-settles, burns `amount` from `holder`, then pays their pro-rata share of the
+    /// SNAPSHOT holder pools (`holderUnderlying`/`holderCash`), never the live pools. The
+    /// denominator is `supplyAtSettle`, frozen at the first settle touch — that is what keeps
+    /// repeated partial redemptions pro-rata-stable against each other (spec §10).
+    ///
+    /// `supplyAtSettle == 0` is guarded explicitly rather than divided through: it can only arise
+    /// when every option was exercised before anyone settled, in which case no holder balance can
+    /// be nonzero either, but the guard still keeps a literal `redeem(id, 0)` call in that state
+    /// from computing a 0/0 division.
+    ///
+    /// Pays by direct ERC-20 transfer, never `AQUA.push` (spec §11): `push` reverts
+    /// `PushToNonActiveStrategyPrevented` on a docked strategy, which would strand a holder's
+    /// payout behind someone else's revoked strategy. Effects (the burn) happen before transfers.
+    function _redeem(uint256 id, address holder, uint256 amount) internal returns (uint256 outU, uint256 outC) {
+        Series storage s = _series[id];
+        if (!s.settled) _settle(id);
+
+        s.token.burn(holder, amount);
+        if (s.supplyAtSettle == 0) return (0, 0);
+
+        outU = F.fullMulDiv(s.holderUnderlying, amount, s.supplyAtSettle);
+        outC = F.fullMulDiv(s.holderCash, amount, s.supplyAtSettle);
+
+        if (outU > 0) require(IERC20Metadata(s.underlying).transfer(holder, outU), TransferFailed());
+        if (outC > 0) require(IERC20Metadata(quote).transfer(holder, outC), TransferFailed());
+
+        emit Redeemed(id, holder, amount, outU, outC);
+    }
+
+    /// @dev Lazy-settles, then pays `writer`'s ENTIRE written position, one-shot: `w` is cached
+    /// first and `written[id][writer]` is zeroed BEFORE the payout is computed, so a second call
+    /// reads `w == 0` and returns `(0, 0)` immediately — there is no partial claim.
+    ///
+    /// The denominator `writtenAtSettle` cannot be zero whenever `w > 0`: it is `totalWritten` at
+    /// the moment of settlement, and a nonzero written position can only ever shrink between then
+    /// and now (via `close`, which only runs pre-expiry), never grow from zero.
+    ///
+    /// Pays by direct ERC-20 transfer to the writer's own wallet, never `AQUA.push` (spec §11),
+    /// for the same reason as `_redeem` above.
+    function _claim(uint256 id, address writer) internal returns (uint256 outU, uint256 outC) {
+        Series storage s = _series[id];
+        if (!s.settled) _settle(id);
+
+        uint256 w = written[id][writer];
+        if (w == 0) return (0, 0);
+        written[id][writer] = 0;
+
+        outU = F.fullMulDiv(s.writerUnderlying, w, s.writtenAtSettle);
+        outC = F.fullMulDiv(s.writerCash, w, s.writtenAtSettle);
+
+        if (outU > 0) require(IERC20Metadata(s.underlying).transfer(writer, outU), TransferFailed());
+        if (outC > 0) require(IERC20Metadata(quote).transfer(writer, outC), TransferFailed());
+
+        emit WriterClaimed(id, writer, outU, outC);
     }
 }
