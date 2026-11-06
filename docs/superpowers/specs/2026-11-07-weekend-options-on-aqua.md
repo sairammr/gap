@@ -118,21 +118,48 @@ Unlike the §10 close guard, whose cost is a bounded liveness loss, **there is n
 loss here** — it is the whole in-the-money value of every unexercised position in the series,
 and the party who loses it has no defence. Nothing ships with this open.
 
-The fix is cheap and sits entirely inside the oracle, behind the same `IPriceOracle` interface,
-so nothing above it changes:
+**Two fixes that do NOT work, recorded so nobody re-derives them:**
 
-1. **Bound `recordSettlement` to a short window after expiry.** Outside it, refuse.
-2. **Require multiple observations** across distinct blocks within that window, and settle on
-   their median or time-weighted average rather than a single `slot0`.
+1. **A window bound on `recordSettlement` alone does nothing.** A flash loan completes inside
+   one transaction, so any window of one block or more contains the attack. A window constrains
+   *when* an attacker may act, never *whether*. It is hygiene against recording a badly stale
+   price much later — not mitigation.
+2. **A v4 TWAP is not retrofittable.** Uniswap v4 core has no observation accumulator; v3's
+   array did not survive into v4, oracle functionality moved into hooks, and a pool's hooks are
+   fixed at initialisation by the hook address. The pool we read through `StateView.getSlot0`
+   cannot be given one. An earlier revision of this section called a time-weighted window "a
+   later swap behind the same interface" — wrong on the mechanics as well as the urgency.
 
-Both together: a single-block manipulation can no longer set the price, because one observation
-cannot carry the result, and an attacker must hold the pool off-market across several blocks
-within a window they do not control.
+**The fix is an off-pool, multi-sample settlement source — and it is already written.**
+
+The source repo ships `contracts/src/oracle/PythSettlementOracle.sol`, **113 lines, already
+implementing this same `IPriceOracle`**. It is a direct answer to this hole:
+
+- Price comes from signed Pyth updates, not a pool read. There is no AMM to move, so it
+  **removes the surface** rather than averaging over it.
+- `recordSample` is permissionless (excess fee refunded), but each sample's `publishTime` must
+  fall inside `[expiry, expiry + window]`.
+- It accumulates `sum` / `count`; `settlementPrice` returns the mean.
+- `settlementPrice` returns `ok = false` until `block.timestamp > expiry + window`, so **no
+  single observation can be locked in early** and samples accrue across the whole window. This
+  is exactly the property `V4SpotOracle.recordSettlement` lacks — ours is one-shot and
+  irrevocable on the first call.
+- Rejects duplicate and stale samples, rejects `price <= 0`, and rejects any sample whose Pyth
+  confidence interval exceeds `maxConfBps` of the price.
+- Carries the xStock multiplier, so dividends and splits do not break open positions.
+
+**This is a port, not a design.** Nobody should re-derive a v4 keeper-median from scratch.
+
+**Residual liveness, stated so it is not a surprise.** If nobody submits a sample inside the
+window, `count == 0` → `ok = false` → the §10 grace path → worthless settlement. That is the
+same failure mode the grace path already has, 7 days wide, and the actor is any permissionless
+Pyth relayer rather than a bespoke keeper.
 
 `_settle`'s oracle *sequence* stays exactly as §10 specifies — the defect is in the oracle
-implementation, not in `_settle`. Until the fix lands, the suite carries a test that documents
-the exposure (manipulated price below strike on an ITM CALL; holders redeem 0; writers take the
-pool) so it fails loudly rather than passing silently.
+implementation, not in `_settle`, and nothing above `IPriceOracle` changes either way. Until
+the fix lands, the suite carries a test documenting the exposure (manipulated price below
+strike on an ITM CALL; holders redeem 0; writers take the pool) so it fails loudly rather than
+passing silently.
 
 ## 5. Reused from the existing repo
 
@@ -181,11 +208,22 @@ supported.
 no automatic best-price walking, no eviction. Orders rest off-chain and a taker or solver picks
 which to fill — 1inch's model. Anything that assumes depth or a matching engine is out.
 
+**DEPLOY PREREQUISITE — `PythSettlementOracle`.** See §4. An earlier revision listed Pyth under
+"Out of scope" beside maker bots, vaults and passkey accounts. That grouping was the mistake:
+the others are product surface, this one is the mitigation for the only unbounded-loss hole in
+the protocol. The port kept the manipulable `slot0` reader and cut the hardened oracle the
+protocol being ported actually used. Deploying against `V4SpotOracle` as it stands is the
+accepted-unbounded-loss case, and §4 decides against accepting it.
+
+> Adopting it also pulls in corporate-action multipliers, listed below as out of scope — the
+> oracle carries the xStock multiplier so dividends and splits do not break open positions.
+> That is a free acquisition, not extra work.
+
 **Deferred, not cut:** signed EIP-712 RFQ (a second fill path beside the book, with its own
 typehash/nonce/cancellation surface), and sell-to-open.
 
 **Out of scope:** maker bots, atomic hedging (`HedgedMaker`), vaults, `ShieldedLender`, the
-pooled gap/binary market, passkey accounts, Pyth, corporate-action multipliers. The SwapVM
+pooled gap/binary market, passkey accounts, corporate-action multipliers. The SwapVM
 `WeekendGap` opcode stays deployed but unused (§12.9).
 
 ## 7b. Deliberate drops from the source
@@ -206,6 +244,13 @@ what actually arrived so fee-on-transfer tokens could not under-collateralise a 
 `AQUA.pull` does not measure, so `_buyOption` snapshots `balanceOf(address(this))` either side
 of the pull and reverts on shortfall. An unenforced "underlying must be non-rebasing" header
 comment protects nobody, and under-collateralising a series must fail loudly.
+
+**The oracle having an owner is not a contradiction.** `PythSettlementOracle` is
+`Ownable2Step` with owner-gated `setFeed` / `setWindow`, which sits against the no-admin-key
+reasoning above. The ruling stands: `V4SpotOracle.setPool` is already `onlyOwner`, so the admin
+key exists in the oracle layer either way and adopting Pyth concedes nothing new. An oracle
+with an owner is a different proposition from the options contract having one — the options
+contract holds other people's collateral; the oracle holds nothing and only names a feed.
 
 **No `pause` / `guardian`.** A pause key on a non-upgradeable contract holding other people's
 collateral is a larger liability than the incidents it prevents, on series that live hours.
