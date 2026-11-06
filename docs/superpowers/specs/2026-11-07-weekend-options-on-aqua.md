@@ -42,10 +42,12 @@ custody first. Under Aqua the writer calls `AQUA.ship(app, abi.encode(strategy),
 [amount])`, which moves **no tokens** — it records a commitment. The cover leaves their
 wallet only when a buy calls `AQUA.pull`. A writer who is never hit never moves a token.
 
-**2.2 No resting order book, no RFQ signatures.** A posted quote must reserve collateral,
-which requires custody. So price is **parametric**: the maker ships one `volWad` and the
-chain prices Black-Scholes (r = 0) off the Uniswap v4 spot at fill time. Shipping on-chain
-IS the authorisation — the maker signs nothing and need not be online.
+**2.2 Trading is a SwapVM order, not an on-chain book.** A resting quote cannot reserve
+collateral without custody, and custody is what Aqua exists to avoid. So the venue is the
+**already-deployed `AquaSwapVMRouter`**: a SwapVM order IS a resting quote, and with
+`useAquaInsteadOfSignature` the maker signs nothing — shipping on-chain is the authorisation.
+`order.hash` is plain `keccak256(abi.encode(order))`, deliberately equal to Aqua's
+`strategyHash`. Both directions are supported (§12).
 
 **2.3 Solvency is `min(promise, means)`.** Because `ship` moves nothing, a maker can be
 committed on Aqua's books and broke in their wallet; the pull then reverts inside Aqua
@@ -260,3 +262,152 @@ They deliberately do NOT `AQUA.push` the proceeds back into the writer's commitm
 `push` reverts with `PushToNonActiveStrategyPrevented` on a docked strategy, which would
 strand a writer's claim behind their own revocation. Returning tokens to the wallet is
 unconditional and always succeeds. Re-shipping to write again is the writer's choice.
+
+
+---
+
+# PART II — THE TRADING LAYER
+
+## 12. SwapVM + Extruction
+
+### 12.1 Shape
+
+```
+WeekendOptions.sol   series, pools, collateral, exercise, settle, redeem, claim   (Part I)
+WeekendPricer.sol    Extruction target (opcode 0x04) — Black-Scholes + direction gate
+WeekendDesk.sol      the maker — implements IMakerHooks, writes just-in-time
+AquaSwapVMRouter     the venue — ALREADY DEPLOYED, not modified
+```
+
+**No fork edit. No new opcode. No router redeploy.**
+
+### 12.2 Why Extruction and not an opcode
+
+`AquaOpcodes` ships no WAD transcendental math (only OpenZeppelin `Math`) — which is why the
+in-tree `WeekendGap` opcode prices a linearised Bachelier approximation instead of
+Black-Scholes. A new opcode hits the identical wall. `Extruction` (`0x04`) is already wired
+into `AquaOpcodes` for exactly this purpose, so full A&S pricing lives in our own contract.
+
+`Extruction.exec` assigns the **entire** `SwapRegisters` struct plus the program counter, and
+the VM validates **only** `chopped.length == choppedLength`. Nothing else about the returned
+registers is checked. Treat that as the threat model.
+
+### 12.3 What AquaOpcodes does NOT have — the load-bearing constraint
+
+Present: `Deadline`, `Salt`, `DynamicBalances`, `RequireMinRate`, `Extruction`, `WeekendGap`,
+`JumpIfDirection`, token validators, `XYCSwap`, `PeggedSwap`, `FeeFlatIn`, `FeeProtocol`, `Decay`.
+
+**Absent: `StaticBalances`, `LimitSwap`, `InvalidateTokenIn`, `InvalidateTokenOut`, `Stop`,
+`Revert`, whitelists, `ValidateSeriesEpoch`, `OraclePriceAdjuster`.**
+
+`Extruction`'s own NatSpec prescribes `StaticBalances` + `InvalidateTokenIn/Out` to bound an
+amount-limited strategy. **All three are missing from the Aqua router.** An option-writing
+order is exactly an amount-limited strategy, so this is the gap the design must close by other
+means:
+
+| bound | mechanism |
+|---|---|
+| **cumulative notional** | the Aqua ledger. `Aqua.pull` does `prevBalance - amount` on a checked `uint248` — underflow reverts. Cumulative across every fill of that order hash. **This is the only hard cap.** |
+| **price floor** | `RequireMinRate`, placed *before* `Extruction` in the program (it wraps the remainder via `ctx.runLoop()`). |
+| **taker protection** | the taker's own `minOut` threshold, enforced by SwapVM after the program runs. |
+
+The Aqua ledger must cover `amountOut + feeOut` — the protocol fee is a **second, separate**
+pull.
+
+### 12.4 Aqua strategies are immutable — design around it
+
+`Aqua.ship` enforces `StrategiesMustBeImmutable`. You cannot re-ship the same strategy hash to
+restock. The shipped `amounts[]` is a permanent cumulative cap on everything that order can
+ever sell. Topping up requires `push()`, which moves real tokens in.
+
+**Therefore: ship each series' ask strategy with the option-token balance set to exactly the
+series cap.** The ledger underflow becomes the written-notional cap. Re-offering after
+exhaustion needs a new `salt`.
+
+### 12.5 Two sides, two ships, two gates
+
+```
+ASK  ship [optionToken @ cap, quote @ 0]   gate quote → option   maker writes
+BID  ship [quote @ budget, optionToken @ 0] gate option → quote   maker buys back
+```
+
+Both legs of a pair must be shipped: `AQUA.safeBalances` reverts unless both tokens are in an
+active strategy. The zero leg is there to satisfy that, never as a budget.
+
+**The direction gate is a security control, not a sanity check.** `AquaOpcodes` has no
+`LimitSwap`, so nothing validates direction for free. An ask order accrues quote in the maker's
+Aqua counter; without the gate that counter is a standing allowance for anyone to fill the
+reverse direction at the maker's own ask price. `WeekendPricer` refuses any fill whose
+direction does not match the side the maker shipped.
+
+Spread is expressed as vol: a two-sided maker ships a **higher `volWad` on the ask than on the
+bid**. No separate spread parameter exists. Nothing else prevents a two-sided maker being
+arbitraged flat.
+
+### 12.6 Maker hooks
+
+Verified present and orthogonal to the Aqua branch in `SwapVM.swap()` — the hook call sites sit
+*outside* the `useAquaInsteadOfSignature` block. The only Aqua/traits incompatibilities are
+`unwrapWeth`, custom `receiver` and Permit2; hooks are not among them.
+
+```
+preTransferOut   ASK → mint just-in-time against collateral, enforce per-series short cap
+                 BID → ensure quote on hand
+postTransferIn   ASK → premium becomes collateral
+                 BID → close(id, min(amountIn, written)) — burn, unlock collateral
+```
+
+`AQUA.pull` is a real `transferFrom` out of the maker's wallet, so tokens minted in
+`preTransferOut` are pullable one call later — **provided the desk has approved Aqua for that
+token**. Minting does NOT credit the Aqua ledger (§12.3).
+
+**`active` must be checked in BOTH hooks.** The reference desk checks it only in
+`preTransferOut`, which is safe there solely because ERC-1271 rejects first. On a
+no-signature Aqua path that gap goes live.
+
+### 12.7 Transfer ordering is the TAKER's choice
+
+`IS_FIRST_TRANSFER_FROM_TAKER` (`0x0020`) lives in **taker** traits. The maker cannot force it.
+Unset (the common case) means `_transferOut` runs before `_transferIn` — the desk mints and
+ships option tokens **before** the premium arrives. Atomic, so a reverting in-leg unwinds it.
+
+**The hooks must be correct under both orderings.** Do not write logic that assumes the premium
+has landed. This is a test, not a comment.
+
+### 12.8 Zero prior coverage — we are first
+
+No test anywhere in the fork exercises maker hooks together with an Aqua order.
+`test/solidity/helpers/TraitsHelper.sol` hardcodes all four hook flags to `false`, so no Aqua
+test routed through it can have hooks. `MakerHooks.t.sol` is entirely non-Aqua.
+
+**The combined path must be proven by our own integration test against the real router before
+anything is deployed.** Build traits via `MakerTraitsLib.build` directly, as `MakerHooks.t.sol`
+does, not via `TraitsHelper`.
+
+### 12.9 `WeekendGap` opcode
+
+Left in place, unused. It sits in the live `AquaOpcodes` dispatcher ahead of `Extruction`, so
+every options fill pays one extra comparison — trivial, but it is not inert.
+
+**Open risk:** whether slot `0x52` was free upstream is unproven from this repo (the fork landed
+in one commit with `WeekendGap` already at `0x52`, and `OpcodeEnumCheck.t.sol` pins neither
+`0x52` nor `0x53`). If upstream had `LimitSwap` at `0x52`, every previously-shipped strategy's
+bytes decode differently. **Diff against upstream `1inch/swap-vm` before deploying.**
+
+### 12.10 Order program
+
+```
+Deadline  +  Salt  +  RequireMinRate  +  Extruction(WeekendPricer, args)
+```
+
+`args = abi.encode(uint256 seriesId, uint256 volWad, uint8 side)`, carried in the program bytes
+and therefore covered by the order hash. A maker cannot repoint pricing after shipping: a
+different target changes `order.data`, changes the hash, and the Aqua ledger key no longer
+exists — `safeBalances` reverts before any opcode runs.
+
+## 13. Testing standard
+
+**Real contracts, real transactions, every case.** Integration tests deploy the actual
+`AquaSwapVMRouter`, the actual `Aqua`, the real `WeekendOptions`, real ERC-20s, and drive real
+`router.swap(...)` calls. Mocks are permitted only for the v4 `StateView` lens and the price
+oracle. No mock router, no mock Aqua, no simulated fills.
