@@ -354,4 +354,26 @@ contract DeskTest is Test {
         assertEq(_written(), 0);
         assertEq(_inventory(), 0);
     }
+
+    // ---------------------------------------------------------------- ship
+
+    function test_onlyTheOwnerCanShip() public {
+        address[] memory t = new address[](1);
+        uint256[] memory a = new uint256[](1);
+        t[0] = address(usdc);
+        a[0] = 1e6;
+        vm.prank(address(0xBAD));
+        vm.expectRevert();
+        desk.ship(ROUTER, hex"01", t, a);
+    }
+
+    function test_shipRejectsMismatchedArrayLengths() public {
+        address[] memory t = new address[](2);
+        uint256[] memory a = new uint256[](1);
+        t[0] = address(usdc);
+        t[1] = address(nvdax);
+        a[0] = 1e6;
+        vm.expectRevert(WeekendDesk.LengthMismatch.selector);
+        desk.ship(ROUTER, hex"01", t, a);
+    }
 }

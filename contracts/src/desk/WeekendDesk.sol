@@ -102,6 +102,8 @@ contract WeekendDesk is IMakerHooks, IGapOptionCallback, Ownable2Step {
     event CloseSkipped(uint256 indexed seriesId, uint256 amount);
     event SeriesListed(uint256 indexed seriesId, address indexed optionToken, uint256 maxShort);
     event ActiveSet(bool active);
+    event Shipped(address indexed app, bytes32 indexed strategyHash, address[] tokens, uint256[] amounts);
+    event Docked(address indexed app, bytes32 indexed strategyHash);
 
     constructor(WeekendOptions app_, IAqua aqua_, address router_, address quote_) Ownable(msg.sender) {
         APP = app_;
@@ -149,6 +151,39 @@ contract WeekendDesk is IMakerHooks, IGapOptionCallback, Ownable2Step {
 
     function ownStrategy() external view returns (WeekendOptions.Strategy memory) {
         return _ownStrategy;
+    }
+
+    /// @notice Ship an Aqua strategy FROM this contract. Owner-only.
+    /// @dev A script cannot do this on the desk's behalf. Aqua keys balances by `msg.sender`
+    ///      (`_balances[maker][app][hash][token]`) and SwapVM reads them back with
+    ///      `safeBalances(order.maker, ...)`, so the ship must originate from the address that
+    ///      will be named as the order's maker — this contract.
+    ///
+    ///      `app` is the **router**, not `APP`: on the SwapVM path the shipped bytes are
+    ///      `abi.encode(order)` and Aqua's `strategyHash` is deliberately equal to SwapVM's
+    ///      `hash(order)`. Both legs of the pair must be shipped, since `safeBalances` reverts
+    ///      unless both tokens belong to an active strategy; the zero leg exists only to
+    ///      satisfy that and is never a budget.
+    ///
+    ///      Shipping is irreversible in one direction: `Aqua.ship` enforces
+    ///      `StrategiesMustBeImmutable`, so the amounts here are a permanent cumulative cap on
+    ///      everything that order can ever sell. There is no restock. Re-offering after
+    ///      exhaustion needs an order with a new salt, which hashes to a new strategy.
+    function ship(address app, bytes calldata strategyBytes, address[] calldata tokens, uint256[] calldata amounts)
+        external
+        onlyOwner
+        returns (bytes32 strategyHash)
+    {
+        if (tokens.length != amounts.length) revert LengthMismatch();
+        strategyHash = AQUA.ship(app, strategyBytes, tokens, amounts);
+        emit Shipped(app, strategyHash, tokens, amounts);
+    }
+
+    /// @notice Revoke a shipped strategy, zeroing its balances. Owner-only.
+    /// @dev Docking is irreversible for that hash; re-offering needs a new salt.
+    function dock(address app, bytes32 strategyHash, address[] calldata tokens) external onlyOwner {
+        AQUA.dock(app, strategyHash, tokens);
+        emit Docked(app, strategyHash);
     }
 
     /// @notice REQUIRED before any fill. `AQUA.pull` is a `transferFrom` out of this wallet.

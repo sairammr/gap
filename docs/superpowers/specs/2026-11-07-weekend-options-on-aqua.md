@@ -160,13 +160,21 @@ Underlying NVDAx (18 dp), quote USDC (6 dp), CALL series strike `205` (= `usd(20
 - after settle with no exercises outstanding, the writer claims `usd(2050)` USDC and `0` NVDAx
 
 **In-the-money unexercised CALL, settlePrice `212`:**
-- holder redeems `10 * (212 - 205) / 212` = `sh("0.330188679245283018")` NVDAx (±10 wei)
-- writer claims `sh("9.669811320754716981")` NVDAx (±10 wei)
+- holder redeems `10 * (212 - 205) / 212` = `sh("0.330188679245283018")` NVDAx — **wei-exact**
+- writer claims `sh("9.669811320754716982")` NVDAx — **wei-exact, no tolerance**
 - i.e. `holderUnderlying = amount * (settlePrice - strike) / settlePrice`
 
 **Out-of-the-money CALL, settlePrice `201`:**
 - holder redeems `0` NVDAx
 - writer claims the full `sh(10)` NVDAx back
+
+The two must sum to `poolUnderlying` exactly, because §10 mandates
+`writerUnderlying = poolUnderlying - hU` as an exact subtraction. An earlier revision of this
+section carried the source's `...981`, which is its own JS assertion under tolerance rather
+than the exact value — that pair sums to `9999999999999999999`, one wei short. With no
+exercises outstanding this path is fully deterministic, so a tolerance here would hide the
+rounding drift the vector exists to catch. Tolerances belong only where pool state genuinely
+is non-deterministic.
 
 These exact numbers must be reproduced by the port's tests.
 
@@ -438,6 +446,23 @@ direction does not match the side the maker shipped.
 Spread is expressed as vol: a two-sided maker ships a **higher `volWad` on the ask than on the
 bid**. No separate spread parameter exists. Nothing else prevents a two-sided maker being
 arbitraged flat.
+
+### 12.5b Two deployment constraints discovered in build
+
+Neither is obvious from the contracts and both will waste an afternoon if rediscovered:
+
+**The desk's self-write needs quote in its own wallet.** `AQUA.push` is
+`safeTransferFrom(desk, desk, premium)`, and ERC-20 checks the balance even on a self-transfer.
+So the desk must hold the premium in quote AND have approved Aqua for it, or the push reverts
+`PushToNonActiveStrategyPrevented`. Roughly 11.3 USDC per 2e18 options at ATM / 7d / vol 0.5.
+
+**One own-strategy means one underlying.** `buyOption` reverts `StrategyMismatch` unless
+`s.underlying == series.underlying`. A desk serving two underlyings needs two deployments.
+
+**The desk must ship its own Aqua strategy.** Aqua keys balances by `msg.sender` and SwapVM
+reads them back with `safeBalances(order.maker, ...)`, so `ship` has to originate from the desk
+address itself — a script cannot ship on its behalf. The desk therefore needs an owner-only
+`ship` entry point.
 
 ### 12.6 Maker hooks
 
