@@ -43,3 +43,21 @@ base = "${BASE_RPC_URL}"
 
 [etherscan]
 base_sepolia = { key = "${ETHERSCAN_API_KEY}", chain = 84532 }
+
+[profile.swapvm]
+# Integration tests against the REAL AquaSwapVMRouter. SwapVM needs viaIR + prague (it does not
+# compile under the default profile), so it gets its own profile rather than slowing every build.
+via_ir = true
+evm_version = "prague"
+optimizer_runs = 1
+allow_paths = ["../swap-vm-fork"]
+remappings = [
+  "forge-std/=node_modules/@uniswap/v4-core/lib/forge-std/src/",
+  "@1inch/aqua/=node_modules/@1inch/aqua/",
+  "@1inch/solidity-utils/=node_modules/@1inch/solidity-utils/",
+  "@openzeppelin/contracts/=node_modules/@openzeppelin/contracts/",
+  "@uniswap/v4-core/=node_modules/@uniswap/v4-core/",
+  "@uniswap/v4-periphery/=node_modules/@uniswap/v4-periphery/",
+  "solady/=node_modules/solady/src/",
+  "swapvm/=../swap-vm-fork/contracts/",
+]
