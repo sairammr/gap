@@ -46,14 +46,28 @@ Fully collateralised both sides before a position exists. **No margin, nothing t
 Series 0: ATM CALL, strike `100000000` (100 USDC), `poolId` and `askStrategyHash` in
 `contracts/deployments/base-sepolia.json` — **read addresses from that file at runtime.**
 
-### Proven on chain
+### Proven on chain — the full lifecycle, series 1
 
-A real buy and a real exercise, both broadcast:
+Every step broadcast on the CURRENT deployment and confirmed `status 0x1`. Conservation is
+exact: after `claimFor` the protocol holds **0 USDC and 0 NVDAx**, verified by live reads.
 
-- `0x5b11a058…595acd` — 50.000000 USDC bought **15.096244597808870674 options** at 3.3122 each
-  (Black-Scholes reference ≈3.316, so the on-chain pricer is honest)
-- `0x2af3d9a1…a78cc6` — `exercise(0, …)` with **no oracle read**: options burned,
-  1,509.624460 USDC paid at strike, 15.0962446 NVDAx delivered
+| step | tx |
+|---|---|
+| buy (`router.swap`) | `0xfa495ee82fe2f8f05c77307b77d8b3211d2c128909972cc6945cf7d950b63de8` |
+| sell-back | `0xd60e6314c8882aa5aecaa26c3f3290c478f35d100c83f56c5b081bc9e3f2cd29` |
+| exercise — **no oracle read** | `0x04e67cab227d414e9af85f226a00c6f9110e2a3cd9a8917921d67839d3220977` |
+| `recordSettlement` | `0x84e735a767a84639492e983f1cdd02eb8291ee421d52317d727bc94490e00bf3` |
+| `settle` | `0x5e1b6850354cb9ed3dc605d57389936e99a75b9e947d23cba6ac0c71b3a9950c` |
+| `redeemFor` | `0xa41024c2cc2405df469d451fe0be5e54822493fbc85a06ebd690a65e759ff851` |
+| `claimFor` | `0x7bf7fa8096f004f99b9ad12b700201ce180b3763fb565b2a46d252c17415c4ee` |
+
+**Series 0 is untouched** — `totalWritten == 0`, expires 2026-11-13. Only series 1 ran the
+lifecycle. An earlier demo ran buy and exercise against a *previous* stack whose addresses no
+longer appear here.
+
+Replay it in ~40s without waiting: `forge script script/FullCycle.s.sol --sig 'cycle()'
+--fork-url <rpc>`. It asserts every leg, including `balanceOf(app) == 0`. Note it exits 1 on a
+forge quirk documented in the file — read the printed values, not the exit code.
 
 ---
 
@@ -136,7 +150,7 @@ source protocol). **Revisit if this moves to mainnet or a pool we do not control
 | | |
 |---|---|
 | **Redeploy** | `hashStrategy` moved with `maxSecondsToExpiry`; the live stack predates it |
-| **Keeper** | nobody calls `settle` / `redeemFor` / `claimFor` — all permissionless, so a cron suffices |
+| ~~Keeper~~ | **built** — `keeper/`, zero deps, dry-run by default |
 | **Frontend** | `docs/FRONTEND-INTERFACE.md`, addresses current |
 | **`app/public/deployments/base-sepolia.json`** | still stale |
 | **Rotate the Alchemy key** | an RPC URL with an embedded key was echoed in a console transcript |

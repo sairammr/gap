@@ -1,0 +1,16 @@
+{
+  "name": "@gap/keeper",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Settlement keeper for Weekend Options — records, settles, redeems and claims on the permissionless entry points",
+  "type": "module",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js",
+    "dry-run": "node index.js --once",
+    "test": "node --test index.test.js"
+  },
+  "engines": {
+    "node": ">=22.6"
+  }
+}

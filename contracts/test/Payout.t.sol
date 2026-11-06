@@ -276,4 +276,128 @@ contract PayoutTest is Test {
         assertEq(nvdax.balanceOf(strangerHolder), 330188679245283018); // same golden vector
         assertEq(nvdax.balanceOf(buyer), 0); // the original buyer gets nothing — they hold no tokens
     }
+
+    // ------------------------------------------------------------------ multi-writer pro-rata (I1)
+
+    /// @dev Every test above (and `Close.t.sol`'s) writes through a SINGLE maker, so
+    ///      `written[id][maker] == writtenAtSettle` always holds and `_claim`'s two `fullMulDiv`
+    ///      divisions could be replaced by `outU = s.writerUnderlying; outC = s.writerCash;`
+    ///      without failing a single one of them. `_strategy()` hardcodes the one `maker` state
+    ///      variable, so a second writer needs its own `Strategy` (same shape, different
+    ///      `maker`) shipped and bought through directly instead of the shared helpers.
+    function _strategyOf(address who) internal view returns (WeekendOptions.Strategy memory) {
+        return WeekendOptions.Strategy({
+            app: address(app),
+            maker: who,
+            underlying: address(nvdax),
+            quote: address(usdc),
+            volWad: VOL,
+            minPremiumBps: 0,
+            maxSecondsToExpiry: MAX_TENOR,
+            salt: bytes32(0)
+        });
+    }
+
+    function _shipFor(address who, address token, uint256 amount, WeekendOptions.Strategy memory s) internal {
+        MockERC20(token).mint(who, amount);
+
+        bool quoteIsCover = token == address(usdc);
+        address[] memory tokens = new address[](quoteIsCover ? 1 : 2);
+        uint256[] memory amounts = new uint256[](quoteIsCover ? 1 : 2);
+        tokens[0] = token;
+        amounts[0] = amount;
+        if (!quoteIsCover) {
+            tokens[1] = address(usdc);
+            amounts[1] = 0;
+        }
+
+        vm.startPrank(who);
+        MockERC20(token).approve(address(aqua), type(uint256).max);
+        usdc.approve(address(aqua), type(uint256).max);
+        aqua.ship(address(app), abi.encode(s), tokens, amounts);
+        vm.stopPrank();
+    }
+
+    function _shipAndBuyFor(uint256 id, address who, uint256 amount, address to) internal returns (uint256 need) {
+        WeekendOptions.Strategy memory s = _strategyOf(who);
+        address token;
+        (token, need) = app.collateralFor(id, amount);
+        _shipFor(who, token, need, s);
+        vm.prank(buyer);
+        taker.buy(app, s, id, amount, type(uint256).max, to, abi.encode(who, keccak256(abi.encode(s))));
+    }
+
+    /// @dev Two writers, uneven split (3e18/7e18), same golden ITM-CALL settlement (strike 205,
+    ///      settlePrice 212, spec §9/§10) as `test_redeemAndClaim_itmCall_matchTheSourceProtocolToTheWei`
+    ///      — so `writerUnderlying` is the same known 9669811320754716982, just split across two
+    ///      makers instead of claimed whole by one. Each claim is asserted against its own
+    ///      hand-computed floor, proving the division actually runs per-writer instead of handing
+    ///      back the whole snapshot regardless of who asks.
+    function test_claim_twoWriters_unevenSplit_eachGetsOwnFlooredShare() public {
+        uint256 id = _callSeries();
+        address maker2 = address(0xBEEF2);
+
+        _shipAndBuyFor(id, maker, 3e18, buyer);
+        _shipAndBuyFor(id, maker2, 7e18, buyer);
+        assertEq(app.getSeries(id).totalWritten, 10e18);
+
+        _recordSettlementAt(212e6);
+        app.settle(id);
+        assertEq(app.getSeries(id).writerUnderlying, 9669811320754716982);
+
+        (uint256 outU1, uint256 outC1) = app.claimFor(id, maker);
+        (uint256 outU2, uint256 outC2) = app.claimFor(id, maker2);
+
+        // Hand-computed: floor(9669811320754716982 * 3e18 / 10e18) and the 7e18 complement.
+        assertEq(outU1, 2900943396226415094);
+        assertEq(outU2, 6768867924528301887);
+        assertEq(outC1, 0); // no exercise ever touched the cash leg of this CALL
+        assertEq(outC2, 0);
+        assertEq(nvdax.balanceOf(maker), outU1);
+        assertEq(nvdax.balanceOf(maker2), outU2);
+
+        // At most 1 wei of floor dust per claimant per leg — here, 1 wei total across both.
+        assertEq(app.getSeries(id).writerUnderlying - (outU1 + outU2), 1);
+    }
+
+    /// @dev `close`'s `fullMulDiv(poolUnderlying, amount, totalWritten)` has the same blind spot,
+    ///      and `Close.t.sol`'s only test (`test_close_returnsProRataOfBothPools`) can never show
+    ///      it: for a CALL pre-exercise, `poolUnderlying == totalWritten` identically (both grow
+    ///      by the same `amount` on every write and shrink by the same `outU` on every close), so
+    ///      that leg's pro-rata is a trivial identity for ANY split, exact or not. Only a PUT's
+    ///      cash leg, built through `collateralFor`'s Ceil, can diverge from the write amount —
+    ///      and only when a write's size isn't a round multiple does that Ceil actually round.
+    ///      Two writers split a 10e18 PUT pool unevenly (1,234567890123456789 /
+    ///      8,765432109876543211); writer1's `need` rounds UP by 1 wei at write time, and closing
+    ///      their FULL position floors back DOWN — they get back exactly 1 wei LESS than they
+    ///      shipped, proof the pro-rata genuinely divides and floors instead of just returning
+    ///      the writer's own contribution.
+    function test_close_twoWriters_oddSplit_prorataFloors() public {
+        uint256 id = app.createSeries(address(nvdax), expiry, Kind.PUT, STRIKE);
+        address maker2 = address(0xBEEF2);
+
+        uint256 amt1 = 1_234567890123456789;
+        uint256 amt2 = 8_765432109876543211;
+        assertEq(amt1 + amt2, 10e18);
+
+        uint256 need1 = _shipAndBuyFor(id, maker, amt1, buyer);
+        uint256 need2 = _shipAndBuyFor(id, maker2, amt2, buyer);
+        assertEq(need1, 253086418); // ceil(amt1 * 205e6 / 1e18) — rounds UP against the writer
+        assertEq(need2, 1796913583);
+        assertEq(app.getSeries(id).poolCash, 2050000001);
+        assertEq(app.getSeries(id).totalWritten, 10e18);
+
+        OptionToken token = app.getSeries(id).token;
+        vm.prank(buyer);
+        token.transfer(maker, amt1); // maker buys back their own full position to close it
+
+        uint256 usdc0 = usdc.balanceOf(maker);
+        vm.prank(maker);
+        app.close(id, amt1);
+
+        // Floored pro-rata, not a round number — 1 wei LESS than `need1`, the ceil they paid in.
+        assertEq(usdc.balanceOf(maker) - usdc0, 253086417);
+        assertEq(app.getSeries(id).poolCash, 2050000001 - 253086417);
+        assertEq(app.getSeries(id).totalWritten, amt2);
+    }
 }

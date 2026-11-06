@@ -422,14 +422,25 @@ contract SettleTest is Test {
     }
 
     /// @notice KNOWN, ACCEPTED EXPOSURE (user-reviewed; not fixed by this task).
-    /// @dev `V4SpotOracle.recordSettlement` is permissionless, callable at any time after
-    ///      expiry, reads an instantaneous `slot0`, and is irrevocable once called. So a
-    ///      settlement price is flash-manipulable: depress the pool, record, unwind, and the
-    ///      price is locked forever. On a CALL, pushing the recorded price to <= strike zeroes
-    ///      `hU` outright, so ITM holders get nothing and writers take the whole pool.
+    /// @dev FULL SCOPE (I2): this test pins only ONE slice of it -- the two-step
+    ///      `recordSettlement` route, and only the WRITER-favourable direction. The real exposure
+    ///      is broader on both axes:
+    ///      1. EVERY `oracle.spot()` read reachable from `_settle` is manipulable, not just the
+    ///         one behind `recordSettlement`. Past `expiry + SETTLEMENT_GRACE`, the grace
+    ///         fallback reads `spot()` INSIDE `settle`/`redeem`/`claim` themselves -- and all
+    ///         three are permissionless and lazily invoked. So the attack is atomic in ONE
+    ///         transaction (flash-loan -> move `slot0` -> `redeem`/`claim` -> unwind), strictly
+    ///         easier than this test's two-step, two-transaction, `AlreadyRecorded`-raced route.
+    ///         See `test_settle_KNOWN_EXPOSURE_atomicGracePathManipulationLetsHoldersTakeTheWriterPool`.
+    ///      2. It is bidirectional. This test only demonstrates DEPRESSING the price (writers
+    ///         keep everything, holders get zeroed). PUMPING it is exactly as exploitable in the
+    ///         other direction: on a CALL, `hU = supply*(p-K)/p -> supply` as `p` rises, so
+    ///         holders can take (effectively) the writers' whole pool; on a PUT, depressing `p`
+    ///         toward zero gives `hC = supply*K/1e18`, capped by the `min` at `poolCash` --
+    ///         again the whole writer pool, from the other side.
     ///      `_settle`'s oracle sequence is a faithful §10 port; the defect is in the oracle, not
-    ///      here. Fix on record: port the source's `PythSettlementOracle` (implements the same
-    ///      `IPriceOracle`). If the oracle is ever replaced this test changes shape -- that is
+    ///      here. Known fix: port the source's `PythSettlementOracle` (implements the same
+    ///      `IPriceOracle`). If the oracle is ever replaced these tests change shape -- that is
     ///      the point.
     function test_settle_KNOWN_EXPOSURE_manipulatedSettlementPriceZeroesHolders() public {
         RealOracleHarness memory h = _deployRealOracleHarness();
@@ -452,5 +463,46 @@ contract SettleTest is Test {
         assertLe(s.settlePrice, strike); // the manipulated, permanently-recorded price
         assertEq(s.holderUnderlying, 0); // ITM holders get nothing
         assertEq(s.writerUnderlying, s.poolUnderlying); // writers take the whole pool
+    }
+
+    /// @notice KNOWN, ACCEPTED EXPOSURE (user-reviewed; not fixed by this task) -- see the FULL
+    ///         SCOPE note on the sibling test above.
+    /// @dev This is the STRICTLY EASIER, BIDIRECTIONAL half of the same exposure:
+    ///      1. No `recordSettlement` call anywhere in this test, no `AlreadyRecorded` race to
+    ///         win, no second transaction. Past `expiry + SETTLEMENT_GRACE`, `redeem` lazily
+    ///         calls `_settle`, which falls through to `oracle.spot()` INSIDE that same call. An
+    ///         attacker just moves `slot0` and calls `redeem` -- one transaction, their choice of
+    ///         block, `recorded(asset, expiry)` never even touches `true` (asserted below).
+    ///      2. The OTHER direction from the sibling test: PUMPING the price, not depressing it.
+    ///         On a CALL, `hU = supply*(p-K)/p` strictly approaches `supply` as `p -> infinity`
+    ///         (it can never reach it exactly for a strike `K > 0`, so the `min(hU, poolUnderlying)`
+    ///         cap never literally binds here) but gets arbitrarily close: at 250,000x the
+    ///         strike, writers are left with 4e13 wei of dust out of a 1e19 pool (0.0004%) --
+    ///         holders take, for every practical purpose, the writers' entire pool.
+    function test_settle_KNOWN_EXPOSURE_atomicGracePathManipulationLetsHoldersTakeTheWriterPool() public {
+        RealOracleHarness memory h = _deployRealOracleHarness();
+        uint64 realExpiry = uint64(block.timestamp + 7 days);
+        uint256 strike = 200e6;
+        uint256 id = h.app.createSeries(address(h.nvdax), realExpiry, Kind.CALL, strike);
+        _realShipAndBuy(h, id, 10e18);
+
+        vm.warp(realExpiry + h.app.SETTLEMENT_GRACE()); // past grace -- `redeem` can lazy-settle
+        // The attack, atomic: pump the pool's instantaneous price, then immediately redeem.
+        // sqrtPriceX96 chosen so `spot()` reads exactly 50,000,000e6 (250,000x the 200e6 strike).
+        h.stateView.setSqrtPriceX96(560227709747861407246843904);
+
+        vm.prank(buyer);
+        h.app.redeem(id, 10e18); // no `settle()`, no `recordSettlement` -- one call, lazy-settles
+
+        assertFalse(h.oracle.recorded(address(h.nvdax), realExpiry)); // the record step never ran
+
+        WeekendOptions.Series memory s = h.app.getSeries(id);
+        assertEq(s.settlePrice, 50_000_000e6);
+        assertEq(s.holderUnderlying, 9_999_960_000_000_000_000); // floor(10e18 * (p-K)/p)
+        assertEq(s.writerUnderlying, 40_000_000_000_000); // dust: 0.0004% of the 1e19 pool
+        assertEq(h.nvdax.balanceOf(buyer), s.holderUnderlying);
+
+        h.app.claimFor(id, maker); // writer collects what little is left
+        assertEq(h.nvdax.balanceOf(maker), s.writerUnderlying);
     }
 }
