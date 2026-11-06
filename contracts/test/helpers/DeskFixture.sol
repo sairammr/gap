@@ -53,8 +53,10 @@ import { OrderLib } from "./OrderLib.sol";
 ///         every fill of that order hash; re-offering needs a new salt, which is why every ship
 ///         helper has a salt-taking overload.
 ///
-/// @dev `WeekendOptions.close` does not exist yet. The desk's bid path tolerates that (it
-///      try/catches and keeps the options as inventory), so nothing here may assume it lands.
+/// @dev `WeekendOptions.close` exists but is not guaranteed to land: it reverts
+///      `CloseAfterExercise` once the opposite pool leg is non-empty. The desk's bid path
+///      try/catches and keeps the options as inventory instead, so nothing here may assume it
+///      succeeded — assert on `written()`/`inventory()` together, never on `close` alone.
 abstract contract DeskFixture is Test {
     // ------------------------------------------------------------------ constants
 
@@ -80,6 +82,11 @@ abstract contract DeskFixture is Test {
     ///      `StrategiesMustBeImmutable`. Use the salt-taking overload for a fresh offer.
     bytes32 internal constant ASK_SALT = bytes32(uint256(1));
     bytes32 internal constant BID_SALT = bytes32(uint256(2));
+    /// @dev The PUT side's own salts. Not strictly required — the option token differs, so the
+    ///      order (and therefore the strategy) hashes differently either way — but keeping the
+    ///      salts distinct means a hash collision in a test is never ambiguous.
+    bytes32 internal constant PUT_ASK_SALT = bytes32(uint256(0x11));
+    bytes32 internal constant PUT_BID_SALT = bytes32(uint256(0x12));
 
     /// @dev sqrtPriceX96 for an 18dp underlying / 6dp quote at spot = 205e6, currency0 = asset.
     uint160 internal constant SQRT_PRICE_205 = 1134374654051415993876480;
@@ -92,6 +99,12 @@ abstract contract DeskFixture is Test {
     uint256 internal constant DESK_COVER = 10_000e18;
     uint256 internal constant DESK_CASH = 1_000_000e6;
     uint256 internal constant TAKER_CASH = 1_000_000e6;
+    /// @dev The quote leg of the desk's OWN strategy. Nonzero because a PUT's cover IS quote:
+    ///      `buyOption` pulls `amount * strike / 1e18` of it out of this same ledger entry that
+    ///      the premium is pushed back into. On a CALL this leg is pure plumbing (fact 1) and a
+    ///      zero would do; on a PUT a zero means `makerCapacity` reports `backable == 0` and
+    ///      every ask fill reverts `InsufficientMakerCollateral` before a single token moves.
+    uint256 internal constant DESK_SHIP_CASH = DESK_CASH;
 
     // ------------------------------------------------------------------ deployed
 
@@ -109,6 +122,11 @@ abstract contract DeskFixture is Test {
 
     uint256 internal callId;
     address internal optionToken;
+    /// @dev The cash-secured side. Same underlying, same expiry, same strike as `callId` — only
+    ///      `Kind` differs, which is enough for a distinct `seriesIdOf` key. One desk serves
+    ///      both: `setOwnStrategy` pins `underlying` and `quote`, never a series.
+    uint256 internal putId;
+    address internal putOptionToken;
     uint64 internal expiry;
 
     // ------------------------------------------------------------------ setUp
@@ -131,6 +149,8 @@ abstract contract DeskFixture is Test {
         expiry = uint64(block.timestamp + 7 days);
         callId = app.createSeries(address(underlying), expiry, Kind.CALL, STRIKE);
         optionToken = address(app.getSeries(callId).token);
+        putId = app.createSeries(address(underlying), expiry, Kind.PUT, STRIKE);
+        putOptionToken = address(app.getSeries(putId).token);
 
         desk = new WeekendDesk(app, IAqua(address(aqua)), address(router), address(quote));
         listSeries(SERIES_CAP);
@@ -148,11 +168,21 @@ abstract contract DeskFixture is Test {
         // tops up to max — approving exactly `premiumOwed` there would let `AQUA.push` spend the
         // allowance to zero and silently kill every later pull (fixed in 683b60d).
         desk.approveAqua(optionToken, type(uint256).max);
+        desk.approveAqua(putOptionToken, type(uint256).max);
         desk.approveAqua(address(underlying), type(uint256).max);
         desk.approveAqua(address(quote), type(uint256).max);
 
-        // The desk's own core-protocol strategy. Both legs, quote at zero (facts 1 and 4).
-        _ship(address(app), abi.encode(ownStrategy()), address(underlying), DESK_COVER, address(quote), 0);
+        // The desk's own core-protocol strategy. Both legs funded (facts 1 and 4): the
+        // underlying leg is a CALL's cover, the quote leg is a PUT's cover AND the premium
+        // landing pad for both. See `DESK_SHIP_CASH`.
+        _ship(
+            address(app),
+            abi.encode(ownStrategy()),
+            address(underlying),
+            DESK_COVER,
+            address(quote),
+            DESK_SHIP_CASH
+        );
 
         // The taker pays through the router (`useTransferFromAndAquaPush`), so the router — not
         // Aqua — is what it approves.
@@ -160,16 +190,20 @@ abstract contract DeskFixture is Test {
         vm.startPrank(TAKER);
         quote.approve(address(router), type(uint256).max);
         IERC20(optionToken).approve(address(router), type(uint256).max);
+        IERC20(putOptionToken).approve(address(router), type(uint256).max);
         vm.stopPrank();
     }
 
     // ------------------------------------------------------------------ desk admin
 
-    /// @notice (Re-)list the one series with a short cap. The test contract owns the desk.
+    /// @notice (Re-)list both series with the same short cap. The test contract owns the desk.
+    /// @dev Both sides get the same number because `maxShort` is per-series: a test tightening
+    ///      the CALL cap is never also loosening the PUT one by accident.
     function listSeries(uint256 cap) internal {
-        uint256[] memory ids = new uint256[](1);
-        uint256[] memory caps = new uint256[](1);
+        uint256[] memory ids = new uint256[](2);
+        uint256[] memory caps = new uint256[](2);
         (ids[0], caps[0]) = (callId, cap);
+        (ids[1], caps[1]) = (putId, cap);
         desk.listSeries(ids, caps);
     }
 
@@ -214,6 +248,15 @@ abstract contract DeskFixture is Test {
         });
     }
 
+    /// @notice The same parameters pointed at the cash-secured series. Only the two fields that
+    ///         identify the series move; vol, floor, deadline and rate guard are shared, so an
+    ///         ask that behaves differently here differs because of `Kind`, nothing else.
+    function putParams(uint8 side, bytes32 salt) internal view returns (OrderLib.Params memory p) {
+        p = params(side, salt);
+        p.seriesId = putId;
+        p.optionToken = putOptionToken;
+    }
+
     /// @notice `OrderLib`'s order, wrapped for the router. Field-identical by construction.
     function orderOf(OrderLib.Params memory p) internal pure returns (ISwapVM.Order memory) {
         OrderLib.Order memory o = OrderLib.order(p);
@@ -238,6 +281,16 @@ abstract contract DeskFixture is Test {
 
     function shipBid(bytes32 salt, uint256 budget) internal returns (bytes32 strategyHash, ISwapVM.Order memory o) {
         return ship(params(SIDE_BID, salt), budget);
+    }
+
+    /// @notice Ship the PUT ask: `[putOptionToken @ cap, quote @ 0]`.
+    function shipPutAsk(uint256 cap) internal returns (bytes32 strategyHash, ISwapVM.Order memory o) {
+        return ship(putParams(SIDE_ASK, PUT_ASK_SALT), cap);
+    }
+
+    /// @notice Ship the PUT bid: `[quote @ budget, putOptionToken @ 0]`.
+    function shipPutBid(uint256 budget) internal returns (bytes32 strategyHash, ISwapVM.Order memory o) {
+        return ship(putParams(SIDE_BID, PUT_BID_SALT), budget);
     }
 
     /// @notice Ship whatever `p` describes, with `amount` on the side the maker is selling.
@@ -328,6 +381,14 @@ abstract contract DeskFixture is Test {
 
     function inventory() internal view returns (uint256) {
         return IERC20(optionToken).balanceOf(address(desk));
+    }
+
+    function putWritten() internal view returns (uint256) {
+        return app.written(putId, address(desk));
+    }
+
+    function putInventory() internal view returns (uint256) {
+        return IERC20(putOptionToken).balanceOf(address(desk));
     }
 
     /// @dev `order.data` is `tokenA || tokenB || program`, tokens sorted ascending by `OrderLib`.
