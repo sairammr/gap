@@ -1,0 +1,39 @@
+[profile.default]
+src = "src"
+out = "out"
+libs = ["lib", "node_modules"]
+test = "test"
+script = "script"
+solc = "0.8.30"
+evm_version = "cancun"
+optimizer = true
+optimizer_runs = 1000
+via_ir = false
+fs_permissions = [{ access = "read-write", path = "./deployments" }]
+remappings = [
+  "forge-std/=lib/forge-std/src/",
+  "@1inch/aqua/=node_modules/@1inch/aqua/",
+  "@1inch/solidity-utils/=node_modules/@1inch/solidity-utils/",
+  "@openzeppelin/contracts/=node_modules/@openzeppelin/contracts/",
+  "@uniswap/v4-core/=node_modules/@uniswap/v4-core/",
+  "@uniswap/v4-periphery/=node_modules/@uniswap/v4-periphery/",
+  "solady/=node_modules/solady/src/",
+]
+
+[profile.aqua]
+# Mirrors 1inch/aqua hardhat.config.ts exactly so the deployed Aqua bytecode
+# matches the official mainnet deployment codehash.
+src = "src-aqua"
+out = "out-aqua"
+solc = "0.8.30"
+evm_version = "prague"
+optimizer = true
+optimizer_runs = 10000000
+via_ir = true
+
+[rpc_endpoints]
+base_sepolia = "${BASE_SEPOLIA_RPC_URL}"
+base = "${BASE_RPC_URL}"
+
+[etherscan]
+base_sepolia = { key = "${ETHERSCAN_API_KEY}", chain = 84532 }
