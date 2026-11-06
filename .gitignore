@@ -1,0 +1,11 @@
+# Untrusted external fork (1inch/swap-vm) — commit its source + our WeekendGap changes,
+# never its installed deps or build artifacts.
+swap-vm-fork/node_modules/
+swap-vm-fork/artifacts/
+swap-vm-fork/cache/
+swap-vm-fork/out/
+swap-vm-fork/build/
+swap-vm-fork/coverage/
+swap-vm-fork/coverage.json
+swap-vm-fork/.env
+swap-vm-fork/ignition/deployments/chain-31337/

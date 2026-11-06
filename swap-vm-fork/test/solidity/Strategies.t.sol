@@ -1,0 +1,297 @@
+// SPDX-License-Identifier: LicenseRef-Degensoft-SwapVM-1.1
+pragma solidity ^0.8.27;
+
+/// @custom:license-url https://github.com/1inch/swap-vm/blob/main/LICENSES/SwapVM-1.1.txt
+/// @custom:copyright © 2026 Degensoft Ltd
+
+import { Test } from "forge-std/Test.sol";
+import { Aqua } from "@1inch/aqua/contracts/Aqua.sol";
+
+import { dynamic } from "./utils/Dynamic.sol";
+
+import { ISwapVM } from "../../contracts/interfaces/ISwapVM.sol";
+import { SwapVMRouter, DeployCode, TraitsHelper } from "./helpers/SwapVMTestSetup.sol";
+import { Strategies } from "../../contracts/strategies/Strategies.sol";
+import { StaticBalances } from "../../contracts/instructions/Balances.sol";
+import { LimitSwap } from "../../contracts/instructions/LimitSwap.sol";
+import { XYCConcentrateSwap } from "../../contracts/instructions/XYCConcentrate.sol";
+import { FeeFlatIn } from "../../contracts/instructions/FeeFlat.sol";
+import { Decay } from "../../contracts/instructions/Decay.sol";
+import { InvalidateTokenIn, InvalidateTokenOut } from "../../contracts/instructions/Invalidators.sol";
+import { Deadline, Salt, Stop } from "../../contracts/instructions/Controls.sol";
+
+/**
+ * @title Strategies
+ * @notice Tests for Strategies order builders
+ */
+contract StrategiesTest is Test {
+    Aqua public aqua;
+    SwapVMRouter public swapVM;
+    TraitsHelper internal orders;
+    address public tokenA;
+    address public tokenB;
+
+    address public maker = makeAddr("maker");
+
+    function setUp() public {
+        aqua = new Aqua();
+        orders = DeployCode.TraitsHelper();
+        swapVM = DeployCode.SwapVMRouter(address(aqua), address(0), address(this), "SwapVM", "1.0.0");
+
+        (tokenA, tokenB) = (makeAddr("token1"), makeAddr("token2"));
+        if (tokenA > tokenB) (tokenA, tokenB) = (tokenB, tokenA);
+    }
+
+    function test_Strategies_BuildLimitOrderSell() public view {
+        Strategies.LimitOrder memory args = Strategies.LimitOrder({
+            balanceA: 100e18,
+            balanceB: 200e18,
+            direction: true,
+            sell: true
+        });
+
+        assertEq(this.limitOrder(new bytes[](0), args), bytes.concat(
+            StaticBalances.build(100e18, 200e18),
+            InvalidateTokenOut.build(),
+            LimitSwap.build(true)
+        ));
+    }
+
+    function test_Strategies_BuildLimitOrderBuy() public view {
+        Strategies.LimitOrder memory args = Strategies.LimitOrder({
+            balanceA: 100e18,
+            balanceB: 200e18,
+            direction: true,
+            sell: false
+        });
+
+        assertEq(this.limitOrder(new bytes[](0), args), bytes.concat(
+            StaticBalances.build(100e18, 200e18),
+            InvalidateTokenIn.build(),
+            LimitSwap.build(true)
+        ));
+    }
+
+    function test_Strategies_BuildLimitOrderWithPrefix() public view {
+        bytes[] memory prefix = new bytes[](2);
+        prefix[0] = Deadline.build(uint40(1e9));
+        prefix[1] = Salt.build(uint64(42));
+
+        Strategies.LimitOrder memory args = Strategies.LimitOrder({
+            balanceA: 100e18,
+            balanceB: 200e18,
+            direction: false,
+            sell: true
+        });
+
+        assertEq(this.limitOrder(prefix, args), bytes.concat(
+            Deadline.build(uint40(1e9)),
+            Salt.build(uint64(42)),
+            StaticBalances.build(100e18, 200e18),
+            InvalidateTokenOut.build(),
+            LimitSwap.build(false)
+        ));
+    }
+
+    function test_Strategies_BuildXYCConcentrateOrder() public view {
+        bytes[] memory prefix = new bytes[](1);
+        prefix[0] = Salt.build(uint64(42));
+
+        Strategies.XYCConcentrateOrder memory args = Strategies.XYCConcentrateOrder({
+            sqrtPriceMin: 0.9e18,
+            sqrtPriceMax: 1.1e18,
+            feeBps: 30000,
+            decayPeriod: 0
+        });
+
+        assertEq(this.xycConcentrateOrder(prefix, args), bytes.concat(
+            Salt.build(uint64(42)),
+            FeeFlatIn.build(30000),
+            XYCConcentrateSwap.build(0.9e18, 1.1e18)
+        ));
+    }
+
+    function test_Strategies_BuildXYCConcentrateOrderWithDecay() public view {
+        Strategies.XYCConcentrateOrder memory args = Strategies.XYCConcentrateOrder({
+            sqrtPriceMin: 0.9e18,
+            sqrtPriceMax: 1.1e18,
+            feeBps: 30000,
+            decayPeriod: 300
+        });
+
+        assertEq(this.xycConcentrateOrder(new bytes[](0), args), bytes.concat(
+            FeeFlatIn.build(30000),
+            Decay.build(300),
+            XYCConcentrateSwap.build(0.9e18, 1.1e18)
+        ));
+    }
+
+    function test_Strategies_RevertPrefixUnregistered() public {
+        bytes[] memory prefix = new bytes[](1);
+        prefix[0] = Stop.build();
+
+        vm.expectRevert(abi.encodeWithSelector(Strategies.PrefixUnregistered.selector, uint8(uint256(Stop.opcode))));
+        this.limitOrder(prefix, Strategies.LimitOrder({ balanceA: 1, balanceB: 1, direction: true, sell: true }));
+    }
+
+    function test_Strategies_RevertPrefixTruncated() public {
+        bytes memory instruction = Deadline.build(uint40(1e9));
+        bytes memory truncated = new bytes(instruction.length - 1);
+        for (uint256 i; i < truncated.length; i++) truncated[i] = instruction[i];
+
+        bytes[] memory prefix = new bytes[](1);
+        prefix[0] = truncated;
+
+        vm.expectRevert(abi.encodeWithSelector(Strategies.PrefixInvalidLength.selector, 6, 7));
+        this.limitOrder(prefix, Strategies.LimitOrder({ balanceA: 1, balanceB: 1, direction: true, sell: true }));
+    }
+
+    function test_Strategies_RevertPrefixPadded() public {
+        bytes[] memory prefix = new bytes[](1);
+        prefix[0] = bytes.concat(Deadline.build(uint40(1e9)), hex"00");
+
+        vm.expectRevert(abi.encodeWithSelector(Strategies.PrefixInvalidLength.selector, 8, 7));
+        this.limitOrder(prefix, Strategies.LimitOrder({ balanceA: 1, balanceB: 1, direction: true, sell: true }));
+    }
+
+    function test_Strategies_RevertFeeBpsOutOfRange() public {
+        Strategies.XYCConcentrateOrder memory args = Strategies.XYCConcentrateOrder({
+            sqrtPriceMin: 0.9e18,
+            sqrtPriceMax: 1.1e18,
+            feeBps: 1e7,
+            decayPeriod: 0
+        });
+
+        vm.expectRevert(abi.encodeWithSelector(FeeFlatIn.FeeBpsOutOfRange.selector, 1e7));
+        this.xycConcentrateOrder(new bytes[](0), args);
+    }
+
+    function test_Strategies_RevertInvalidPriceBounds() public {
+        Strategies.XYCConcentrateOrder memory args = Strategies.XYCConcentrateOrder({
+            sqrtPriceMin: 1.1e18,
+            sqrtPriceMax: 0.9e18,
+            feeBps: 30000,
+            decayPeriod: 0
+        });
+
+        vm.expectRevert(abi.encodeWithSelector(XYCConcentrateSwap.ConcentrateInvalidPriceBounds.selector, 1.1e18, 0.9e18));
+        this.xycConcentrateOrder(new bytes[](0), args);
+    }
+
+    function testFuzz_Strategies_QuoteLimitOrderRate(uint256 balanceA, uint256 balanceB, uint256 amountIn, bool sell) public view {
+        balanceA = bound(balanceA, 1e18, 1e27);
+        balanceB = bound(balanceB, 1e18, 1e27);
+        amountIn = bound(amountIn, 1e12, balanceA);
+
+        ISwapVM.Order memory order = _order(this.limitOrder(new bytes[](0), Strategies.LimitOrder({
+            balanceA: balanceA,
+            balanceB: balanceB,
+            direction: true,
+            sell: sell
+        })));
+
+        (uint256 quotedIn, uint256 quotedOut,) = swapVM.asView().quote(order, amountIn, _takerData(true));
+
+        assertEq(quotedIn, amountIn);
+        // Maker gets the order rate or better
+        assertLe(quotedOut * balanceA, quotedIn * balanceB);
+    }
+
+    function testFuzz_Strategies_QuoteXYCConcentrateOrderInBounds(
+        uint256 balanceA,
+        uint256 balanceB,
+        uint256 sqrtPriceMin,
+        uint256 sqrtPriceMax,
+        uint256 amountIn,
+        uint256 feeBps,
+        uint16 decayPeriod,
+        bool isAToB
+    ) public {
+        feeBps = bound(feeBps, 0, 0.01e7);
+        balanceA = bound(balanceA, 1e18, 1e27);
+        balanceB = bound(balanceB, 1e18, 1e27);
+        sqrtPriceMin = bound(sqrtPriceMin, 0.1e18, 10e18);
+        sqrtPriceMax = bound(sqrtPriceMax, sqrtPriceMin * 2, 20e18);
+        uint256 balanceIn = isAToB ? balanceA : balanceB;
+        amountIn = bound(amountIn, balanceIn / 1e4 + 1, balanceIn * 100);
+
+        ISwapVM.Order memory order = _ship(this.xycConcentrateOrder(new bytes[](0), Strategies.XYCConcentrateOrder({
+            sqrtPriceMin: sqrtPriceMin,
+            sqrtPriceMax: sqrtPriceMax,
+            feeBps: uint24(feeBps),
+            decayPeriod: decayPeriod
+        })), balanceA, balanceB);
+
+        (uint256 quotedIn, uint256 quotedOut,) = swapVM.asView().quote(order, amountIn, _takerData(isAToB));
+
+        // Maker never pays out beyond the shipped reserves and never sells cheaper than the direction's range corner
+        if (isAToB) {
+            assertLe(quotedOut, balanceB);
+            assertLe(quotedOut * 1e36, quotedIn * sqrtPriceMax * sqrtPriceMax);
+        } else {
+            assertLe(quotedOut, balanceA);
+            assertLe(quotedOut * sqrtPriceMin * sqrtPriceMin, quotedIn * 1e36);
+        }
+    }
+
+    function _order(bytes memory program) internal view returns (ISwapVM.Order memory) {
+        return orders.MakerTraitsLibBuild(TraitsHelper.MakerTraitsLibArgs({
+            maker: maker,
+            tokenA: tokenA,
+            tokenB: tokenB,
+            shouldUnwrapWeth: false,
+            useAquaInsteadOfSignature: false,
+            usePermit2: false,
+            allowZeroAmountIn: false,
+            receiver: address(0),
+            program: program
+        }));
+    }
+
+    function _ship(bytes memory program, uint256 balanceA, uint256 balanceB) internal returns (ISwapVM.Order memory order) {
+        order = orders.MakerTraitsLibBuild(TraitsHelper.MakerTraitsLibArgs({
+            maker: maker,
+            tokenA: tokenA,
+            tokenB: tokenB,
+            shouldUnwrapWeth: false,
+            useAquaInsteadOfSignature: true,
+            usePermit2: false,
+            allowZeroAmountIn: false,
+            receiver: address(0),
+            program: program
+        }));
+
+        vm.prank(maker);
+        aqua.ship(address(swapVM), abi.encode(order), dynamic([tokenA, tokenB]), dynamic([balanceA, balanceB]));
+    }
+
+    function _takerData(bool isAToB) internal view returns (bytes memory) {
+        return orders.TakerTraitsLibBuild(TraitsHelper.TakerTraitsLibArgs({
+            taker: address(0),
+            isExactIn: true,
+            shouldUnwrapWeth: false,
+            isFirstTransferFromTaker: false,
+            useTransferFromAndAquaPush: true,
+            isAToB: isAToB,
+            allowPartialFill: true,
+            usePermit2: false,
+            threshold: "",
+            to: address(0),
+            hasPreTransferInCallback: false,
+            signature: ""
+        }));
+    }
+
+    // Externals routing memory test data into the calldata-only builders
+
+    function limitOrder(bytes[] calldata prefix, Strategies.LimitOrder calldata args) external pure returns (bytes memory) {
+        return Strategies.buildLimitOrder(prefix, args);
+    }
+
+    function xycConcentrateOrder(
+        bytes[] calldata prefix,
+        Strategies.XYCConcentrateOrder calldata args
+    ) external pure returns (bytes memory) {
+        return Strategies.buildXYCConcentrateOrder(prefix, args);
+    }
+}

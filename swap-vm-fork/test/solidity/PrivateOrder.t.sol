@@ -1,0 +1,112 @@
+// SPDX-License-Identifier: LicenseRef-Degensoft-SwapVM-1.1
+pragma solidity ^0.8.27;
+
+/// @custom:license-url https://github.com/1inch/swap-vm/blob/main/LICENSES/SwapVM-1.1.txt
+/// @custom:copyright © 2026 Degensoft Ltd
+
+import { Test } from "forge-std/Test.sol";
+import { console } from "forge-std/console.sol";
+import { TokenMock } from "@1inch/solidity-utils/contracts/mocks/TokenMock.sol";
+
+import { Aqua } from "@1inch/aqua/contracts/Aqua.sol";
+
+import { ISwapVM } from "../../contracts/interfaces/ISwapVM.sol";
+import { LimitSwapVMRouter, DeployCode, TraitsHelper } from "./helpers/SwapVMTestSetup.sol";
+import { PrivateOrder } from "../../contracts/instructions/Whitelist.sol";
+import { StaticBalances, DynamicBalances } from "../../contracts/instructions/Balances.sol";
+import { LimitSwap, LimitSwapFullAmount } from "../../contracts/instructions/LimitSwap.sol";
+
+/// @title Whitelist tests
+contract PrivateOrderTest is Test {
+    Aqua public immutable aqua;
+    LimitSwapVMRouter public swapVM;
+    TraitsHelper internal orders;
+    TokenMock public tokenA;
+    TokenMock public tokenB;
+
+    address public maker;
+    uint256 public makerPK = 0x1234;
+
+    uint256 constant BALANCE_A = 1000e18;
+    uint256 constant BALANCE_B = 2000e18;
+    uint256 constant SWAP_AMOUNT = 1e18;
+
+    address ALLOWED_TAKER = 0x00000000000000eE000200000000000000fF0002;
+    address COLLISION_TAKER = 0x00000000000000bAdbad00000000000000fF0002;
+    address BAD_TAKER = 0x00000000000000eE000200000000000000BadBad;
+
+    function setUp() public {
+        maker = vm.addr(makerPK);
+        orders = DeployCode.TraitsHelper();
+        swapVM = DeployCode.LimitSwapVMRouter(address(aqua), address(0), address(this), "SwapVM", "1.0.0");
+
+        tokenA = new TokenMock("Token I", "TKI");
+        tokenB = new TokenMock("Token J", "TKJ");
+        if (tokenA > tokenB) (tokenA, tokenB) = (tokenB, tokenA);
+
+        tokenA.mint(maker, 1e30);
+        tokenB.mint(maker, 1e30);
+
+        vm.prank(maker);
+        tokenA.approve(address(swapVM), type(uint256).max);
+        vm.prank(maker);
+        tokenB.approve(address(swapVM), type(uint256).max);
+    }
+
+    function test_PrivateOrder() public {
+        ISwapVM.Order memory order = _buildOrder(_buildProgram());
+        bytes memory takerData = _buildTakerData();
+
+        vm.prank(ALLOWED_TAKER);
+        swapVM.quote(order, SWAP_AMOUNT, takerData);
+
+        vm.prank(COLLISION_TAKER);
+        swapVM.quote(order, SWAP_AMOUNT, takerData);
+
+        vm.prank(BAD_TAKER);
+        vm.expectRevert(PrivateOrder.PrivateOrderInvalidTaker.selector);
+        swapVM.quote(order, SWAP_AMOUNT, takerData);
+    }
+
+    /// @dev whitelist -> staticBalances -> limitswap
+    function _buildProgram() internal view returns (bytes memory) {
+        bytes memory code = bytes.concat(
+            PrivateOrder.build(ALLOWED_TAKER),
+            StaticBalances.build(BALANCE_A, BALANCE_B),
+            LimitSwap.build(address(tokenA), address(tokenB))
+        );
+
+        return code;
+    }
+
+    function _buildOrder(bytes memory program) private view returns (ISwapVM.Order memory) {
+        return orders.MakerTraitsLibBuild(TraitsHelper.MakerTraitsLibArgs({
+            maker: maker,
+            tokenA: address(tokenA),
+            tokenB: address(tokenB),
+            shouldUnwrapWeth: false,
+            useAquaInsteadOfSignature: false,
+            usePermit2: false,
+            allowZeroAmountIn: false,
+            receiver: address(0),
+            program: program
+        }));
+    }
+
+    function _buildTakerData() private view returns (bytes memory) {
+        return orders.TakerTraitsLibBuild(TraitsHelper.TakerTraitsLibArgs({
+            taker: address(0),
+            isExactIn: true,
+            shouldUnwrapWeth: false,
+            isFirstTransferFromTaker: false,
+            useTransferFromAndAquaPush: false,
+            isAToB: true,
+            allowPartialFill: false,
+            usePermit2: false,
+            threshold: "",
+            to: address(this),
+            hasPreTransferInCallback: false,
+            signature: ""
+        }));
+    }
+}

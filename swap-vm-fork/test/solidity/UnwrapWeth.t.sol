@@ -1,0 +1,324 @@
+// SPDX-License-Identifier: LicenseRef-Degensoft-SwapVM-1.1
+pragma solidity ^0.8.27;
+
+/// @custom:license-url https://github.com/1inch/swap-vm/blob/main/LICENSES/SwapVM-1.1.txt
+/// @custom:copyright © 2026 Degensoft Ltd
+
+import { Test } from "forge-std/Test.sol";
+import { TokenMock } from "@1inch/solidity-utils/contracts/mocks/TokenMock.sol";
+import { EthReceiver } from "@1inch/solidity-utils/contracts/mixins/EthReceiver.sol";
+import { Aqua } from "@1inch/aqua/contracts/Aqua.sol";
+
+import { ISwapVM } from "../../contracts/interfaces/ISwapVM.sol";
+import { SwapVMRouter, DeployCode, TraitsHelper } from "./helpers/SwapVMTestSetup.sol";
+import { StaticBalances, DynamicBalances } from "../../contracts/instructions/Balances.sol";
+import { XYCSwap } from "../../contracts/instructions/XYCSwap.sol";
+
+import { WETHMock } from "./mocks/WETHMock.sol";
+import { Permit2TestLib } from "./helpers/Permit2TestLib.sol";
+
+contract UnwrapWethTest is Test {
+    SwapVMRouter public swapVM;
+    TraitsHelper internal orders;
+    WETHMock public weth;
+    TokenMock public token;
+
+    address public maker;
+    uint256 public makerPrivateKey;
+    address public taker = makeAddr("taker");
+
+    uint256 constant ORDER_BALANCE = 1000e18;
+
+    function setUp() public {
+        makerPrivateKey = 0x1234;
+        maker = vm.addr(makerPrivateKey);
+
+        weth = new WETHMock();
+        orders = DeployCode.TraitsHelper();
+        swapVM = DeployCode.SwapVMRouter(address(0), address(weth), msg.sender, "SwapVM", "1.0.0");
+        token = new TokenMock("Token J", "TKJ");
+
+        token.mint(maker, 1_000_000e18);
+        token.mint(taker, 1_000_000e18);
+
+        vm.prank(maker);
+        token.approve(address(swapVM), type(uint256).max);
+        vm.prank(maker);
+        weth.approve(address(swapVM), type(uint256).max);
+
+        vm.prank(taker);
+        token.approve(address(swapVM), type(uint256).max);
+        vm.prank(taker);
+        weth.approve(address(swapVM), type(uint256).max);
+    }
+
+    function _buildOrder(
+        bool makerUnwrapWeth,
+        address receiver,
+        address tokenA,
+        address tokenB
+    ) internal view returns (ISwapVM.Order memory order, bytes memory signature) {
+        return _buildOrder(makerUnwrapWeth, receiver, tokenA, tokenB, false);
+    }
+
+    function _buildOrder(
+        bool makerUnwrapWeth,
+        address receiver,
+        address tokenA,
+        address tokenB,
+        bool usePermit2
+    ) internal view returns (ISwapVM.Order memory order, bytes memory signature) {
+        // MakerTraits requires tokenA < tokenB; balances are symmetric so ordering of values is irrelevant
+        (address lowerToken, address higherToken) = tokenA < tokenB ? (tokenA, tokenB) : (tokenB, tokenA);
+
+        bytes memory programBytes = bytes.concat(
+            DynamicBalances.build(ORDER_BALANCE, ORDER_BALANCE),
+            XYCSwap.build()
+        );
+
+        order = orders.MakerTraitsLibBuild(TraitsHelper.MakerTraitsLibArgs({
+            maker: maker,
+            tokenA: lowerToken,
+            tokenB: higherToken,
+            shouldUnwrapWeth: makerUnwrapWeth,
+            useAquaInsteadOfSignature: false,
+            usePermit2: usePermit2,
+            allowZeroAmountIn: false,
+            receiver: receiver,
+            program: programBytes
+        }));
+
+        bytes32 orderHash = swapVM.hash(order);
+        (uint8 v, bytes32 r, bytes32 s) = vm.sign(makerPrivateKey, orderHash);
+        signature = abi.encodePacked(r, s, v);
+    }
+
+    function _buildTakerData(
+        bool isExactIn,
+        bool takerUnwrapWeth,
+        bool isAToB,
+        address recipient,
+        bytes memory signature
+    ) internal view returns (bytes memory) {
+        return _buildTakerData(isExactIn, takerUnwrapWeth, isAToB, recipient, signature, false);
+    }
+
+    function _buildTakerData(
+        bool isExactIn,
+        bool takerUnwrapWeth,
+        bool isAToB,
+        address recipient,
+        bytes memory signature,
+        bool usePermit2
+    ) internal view returns (bytes memory) {
+        return orders.TakerTraitsLibBuild(TraitsHelper.TakerTraitsLibArgs({
+            taker: taker,
+            isExactIn: isExactIn,
+            shouldUnwrapWeth: takerUnwrapWeth,
+            isFirstTransferFromTaker: false,
+            useTransferFromAndAquaPush: false,
+            isAToB: isAToB,
+            allowPartialFill: false,
+            usePermit2: usePermit2,
+            threshold: "",
+            to: recipient,
+            hasPreTransferInCallback: false,
+            signature: signature
+        }));
+    }
+
+    function _prepareWeth(address user, uint256 amount) internal {
+        vm.deal(user, amount);
+        vm.prank(user);
+        weth.deposit{value: amount}();
+    }
+
+    function test_RejectDirectEtherTransfer() public {
+        vm.deal(address(this), 1 ether);
+
+        (bool success, bytes memory returnData) = address(swapVM).call{value: 1 ether}("");
+
+        assertFalse(success, "Direct ether transfer should fail");
+        assertEq(returnData, abi.encodeWithSelector(EthReceiver.EthDepositRejected.selector), "Should revert with EthDepositRejected");
+    }
+    // ==================== MAKER UNWRAP TESTS ====================
+
+    function test_MakerShouldReciveEth() public {
+        uint256 amountIn = 10e18;
+        _prepareWeth(taker, amountIn);
+
+        (ISwapVM.Order memory order, bytes memory signature) = _buildOrder(true, address(0), address(weth), address(token));
+        bytes memory takerData = _buildTakerData(true, false, address(weth) < address(token), taker, signature);
+
+        uint256 makerEthBefore = maker.balance;
+        uint256 takerWethBefore = weth.balanceOf(taker);
+
+        vm.prank(taker);
+        (uint256 actualAmountIn,,) = swapVM.swap(order, amountIn, takerData);
+
+        // Maker receives ETH (not WETH) and sends tokens
+        assertEq(maker.balance - makerEthBefore, actualAmountIn, "Maker should receive ETH");
+        assertEq(weth.balanceOf(maker), 0, "Maker should not receive WETH");
+
+        // Taker sends WETH and receives tokens
+        assertEq(takerWethBefore - weth.balanceOf(taker), actualAmountIn, "Taker should spend WETH");
+    }
+
+    function test_MakerShouldReceiveEth_Permit2() public {
+        Permit2TestLib.install();
+        uint256 amountIn = 10e18;
+        _prepareWeth(taker, amountIn);
+        Permit2TestLib.approve(address(weth), taker, address(swapVM), uint160(amountIn), type(uint48).max);
+        vm.prank(taker);
+        weth.approve(address(swapVM), 0);
+
+        (ISwapVM.Order memory order, bytes memory signature) = _buildOrder(true, address(0), address(weth), address(token));
+        bytes memory takerData = _buildTakerData(true, false, address(weth) < address(token), taker, signature, true);
+
+        uint256 makerEthBefore = maker.balance;
+        vm.prank(taker);
+        (uint256 actualAmountIn,,) = swapVM.swap(order, amountIn, takerData);
+
+        assertEq(maker.balance - makerEthBefore, actualAmountIn, "Maker should receive Permit2-funded ETH");
+        assertEq(weth.balanceOf(maker), 0, "Maker should not receive WETH");
+        assertEq(Permit2TestLib.allowance(taker, address(weth), address(swapVM)).amount, 0, "Taker Permit2 allowance not consumed");
+    }
+
+    function test_MakerShouldReciveEthToCustomAddress() public {
+        address makerReceiver = makeAddr("makerReceiver");
+        uint256 amountIn = 10e18;
+        _prepareWeth(taker, amountIn);
+
+        (ISwapVM.Order memory order, bytes memory signature) = _buildOrder(true, makerReceiver, address(weth), address(token));
+        bytes memory takerData = _buildTakerData(true, false, address(weth) < address(token), taker, signature);
+
+        uint256 receiverEthBefore = makerReceiver.balance;
+        uint256 makerEthBefore = maker.balance;
+
+        vm.prank(taker);
+        (uint256 actualAmountIn,,) = swapVM.swap(order, amountIn, takerData);
+
+        assertEq(makerReceiver.balance - receiverEthBefore, actualAmountIn, "Receiver should receive ETH");
+        assertEq(maker.balance, makerEthBefore, "Maker should not receive ETH");
+        assertEq(weth.balanceOf(makerReceiver), 0, "Receiver should not receive WETH");
+    }
+
+    // ==================== TAKER UNWRAP TESTS ====================
+
+    function test_TakerShouldReciveEth() public {
+        uint256 amountIn = 10e18;
+        _prepareWeth(maker, ORDER_BALANCE);
+
+        (ISwapVM.Order memory order, bytes memory signature) = _buildOrder(false, address(0), address(token), address(weth));
+        bytes memory takerData = _buildTakerData(true, true, address(token) < address(weth), taker, signature);
+
+        uint256 takerEthBefore = taker.balance;
+        uint256 makerWethBefore = weth.balanceOf(maker);
+
+        vm.prank(taker);
+        (, uint256 amountOut,) = swapVM.swap(order, amountIn, takerData);
+
+        // Taker receives ETH (not WETH)
+        assertEq(taker.balance - takerEthBefore, amountOut, "Taker should receive ETH");
+        assertEq(weth.balanceOf(taker), 0, "Taker should not receive WETH");
+
+        // Maker sends WETH
+        assertEq(makerWethBefore - weth.balanceOf(maker), amountOut, "Maker should spend WETH");
+    }
+
+    function test_TakerShouldReceiveEth_Permit2() public {
+        Permit2TestLib.install();
+        uint256 amountIn = 10e18;
+        _prepareWeth(maker, ORDER_BALANCE);
+        Permit2TestLib.approve(address(weth), maker, address(swapVM), uint160(ORDER_BALANCE), type(uint48).max);
+        vm.prank(maker);
+        weth.approve(address(swapVM), 0);
+
+        (ISwapVM.Order memory order, bytes memory signature) = _buildOrder(false, address(0), address(token), address(weth), true);
+        bytes memory takerData = _buildTakerData(true, true, address(token) < address(weth), taker, signature);
+
+        uint256 takerEthBefore = taker.balance;
+        uint256 makerWethBefore = weth.balanceOf(maker);
+        vm.prank(taker);
+        (, uint256 amountOut,) = swapVM.swap(order, amountIn, takerData);
+
+        assertEq(taker.balance - takerEthBefore, amountOut, "Taker should receive Permit2-funded ETH");
+        assertEq(makerWethBefore - weth.balanceOf(maker), amountOut, "Maker should spend WETH through Permit2");
+        assertEq(Permit2TestLib.allowance(maker, address(weth), address(swapVM)).amount, ORDER_BALANCE - amountOut, "Wrong remaining maker Permit2 allowance");
+    }
+
+    function test_TakerShouldReciveEthToCustomAddress() public {
+        address takerRecipient = makeAddr("takerRecipient");
+        uint256 amountIn = 10e18;
+        _prepareWeth(maker, ORDER_BALANCE);
+
+        (ISwapVM.Order memory order, bytes memory signature) = _buildOrder(false, address(0), address(token), address(weth));
+        bytes memory takerData = _buildTakerData(true, true, address(token) < address(weth), takerRecipient, signature);
+
+        uint256 recipientEthBefore = takerRecipient.balance;
+        uint256 takerEthBefore = taker.balance;
+
+        vm.prank(taker);
+        (, uint256 amountOut,) = swapVM.swap(order, amountIn, takerData);
+
+        assertEq(takerRecipient.balance - recipientEthBefore, amountOut, "Recipient should receive ETH");
+        assertEq(taker.balance - takerEthBefore, 0, "Taker should not receive ETH");
+        assertEq(weth.balanceOf(takerRecipient), 0, "Recipient should not receive WETH");
+    }
+
+    // ==================== FUZZ TESTS ====================
+
+    function testFuzz_UnwrapWeth(
+        uint8 seedUnwrapWeth,
+        bool isExactIn,
+        uint128 rawAmount
+    ) public {
+        // Can't have same token for both in and out
+        bool makerUnwrapWeth = seedUnwrapWeth % 3 == 0;
+        bool takerUnwrapWeth = seedUnwrapWeth % 3 == 1;
+
+        uint256 amount = bound(uint256(rawAmount), 1e15, ORDER_BALANCE / 2);
+
+        // Setup tokens based on unwrap flags
+        address tokenIn;
+        address tokenOut;
+
+        if (makerUnwrapWeth) {
+            // Taker sends WETH, maker receives as ETH
+            tokenIn = address(weth);
+            tokenOut = address(token);
+            _prepareWeth(taker, amount * 2);
+        } else if (takerUnwrapWeth) {
+            // Maker sends WETH, taker receives as ETH
+            tokenIn = address(token);
+            tokenOut = address(weth);
+            _prepareWeth(maker, ORDER_BALANCE);
+        } else {
+            // No unwrap, use WETH as tokenIn for variety
+            tokenIn = address(weth);
+            tokenOut = address(token);
+            _prepareWeth(taker, amount * 2);
+        }
+
+        (ISwapVM.Order memory order, bytes memory signature) = _buildOrder(makerUnwrapWeth, address(0), tokenIn, tokenOut);
+        bytes memory takerData = _buildTakerData(isExactIn, takerUnwrapWeth, tokenIn < tokenOut, taker, signature);
+
+        uint256 makerEthBefore = maker.balance;
+        uint256 takerEthBefore = taker.balance;
+
+        vm.prank(taker);
+        (uint256 amountIn, uint256 amountOut,) = swapVM.swap(order, amount, takerData);
+
+        if (makerUnwrapWeth) {
+            assertEq(maker.balance - makerEthBefore, amountIn, "Maker should receive ETH when unwrapping");
+        } else {
+            assertEq(maker.balance, makerEthBefore, "Maker ETH should not change");
+        }
+
+        if (takerUnwrapWeth) {
+            assertEq(taker.balance - takerEthBefore, amountOut, "Taker should receive ETH when unwrapping");
+        } else {
+            assertEq(taker.balance, takerEthBefore, "Taker ETH should not change");
+        }
+    }
+}
