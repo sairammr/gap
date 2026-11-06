@@ -738,6 +738,25 @@ token**. Minting does NOT credit the Aqua ledger (§12.3).
 `preTransferOut`, which is safe there solely because ERC-1271 rejects first. On a
 no-signature Aqua path that gap goes live.
 
+### 12.6b DO NOT attach a token-out `FeeProtocol` to an ask order
+
+Proven on the real router. `FeeProtocol.exec` subtracts the fee from `ctx.swap.amountOut`
+**before** `_transferOut` runs, so `preTransferOut` hands `WeekendDesk._mintShortfall` the
+**net** amount. The desk mints net; the router then pulls net + fee out of it. The desk is
+structurally short by exactly the fee.
+
+Observed: minted `1e18`, fee pull of `10101010101010101` succeeded, principal pull of `1e18`
+reverted `ERC20InsufficientBalance(desk, 989898989898989899, 1e18)` — **with 10e18 still in the
+Aqua ledger.** Not a cap problem.
+
+Fixing it properly needs the gross amount, which only `postTransferOut` is given, or a standing
+float at the desk. Neither is built. **Until one is, an ask order must not carry a token-out
+`FeeProtocol`.**
+
+A token-**in** fee is unaffected: with `useTransferFromAndAquaPush` it resolves through
+`ProtocolFeeLib.resolveInSafeTransfer` against the router's own balance, never a maker-side
+pull. Only the token-out fee is.
+
 ### 12.7 Transfer ordering is the TAKER's choice
 
 `IS_FIRST_TRANSFER_FROM_TAKER` (`0x0020`) lives in **taker** traits. The maker cannot force it.
