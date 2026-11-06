@@ -21,8 +21,7 @@ enum Kind {
 
 /// @title WeekendOptions
 /// @notice Fully collateralized, physically-settled options on tokenized stocks, priced in one
-/// quote token (USDC). This file holds the series registry; write/exercise/close/settlement/
-/// payout/quoting surfaces are added by later tasks on top of the same contract.
+/// quote token (USDC).
 ///
 /// Units: underlying and option amounts are 18 decimals. `strike` and every oracle price are
 /// quote-token units (6 dp USDC) per 1e18 of underlying.
@@ -189,7 +188,9 @@ contract WeekendOptions is AquaApp {
     }
 
     /// @notice Token and amount a writer must lock for `amount` options.
-    /// @dev The only Ceil in the protocol: the writer's obligation rounds up against them.
+    /// @dev No Ceil in the settlement block (spec §10); this is one of the two Ceils in the
+    /// protocol outside it — the writer's obligation rounds up against them. (The other is
+    /// `exercise`'s CALL `pay`, which rounds up against the exerciser.)
     function collateralFor(uint256 id, uint256 amount) public view returns (address token, uint256 need) {
         Series storage s = _series[id];
         if (s.kind == Kind.CALL) return (s.underlying, amount);
@@ -352,7 +353,7 @@ contract WeekendOptions is AquaApp {
     /// @dev Taken off the STRIKE NOTIONAL (`amount * strike / 1e18`), not off the collateral:
     /// collateral is underlying-denominated for a CALL and quote-denominated for a PUT, so bps
     /// of it would mean two different things. The strike notional is quote-denominated for both,
-    /// which is what the premium is too. Both steps floor — `collateralFor` stays the only Ceil.
+    /// which is what the premium is too. Both steps floor — no Ceil in the settlement block.
     function _premiumFloor(uint16 minPremiumBps, uint256 strike, uint256 amount) internal pure returns (uint256) {
         return F.fullMulDiv(F.fullMulDiv(amount, strike, 1e18), minPremiumBps, 10_000);
     }
@@ -404,8 +405,13 @@ contract WeekendOptions is AquaApp {
             s.poolUnderlying += amount;
             s.poolCash -= get;
 
-            // Interactions.
+            // Interactions. Mirrors Rider B's `ShortPull` guard in `_buyOption`: for a PUT, the
+            // underlying reaches the contract ONLY here (never through `AQUA.pull`), and
+            // `poolUnderlying` above is already credited the full `amount` -- measuring what
+            // actually arrived is what keeps that credit honest against a fee-on-transfer token.
+            uint256 balBefore = IERC20Metadata(s.underlying).balanceOf(address(this));
             require(IERC20Metadata(s.underlying).transferFrom(msg.sender, address(this), amount), TransferFailed());
+            if (IERC20Metadata(s.underlying).balanceOf(address(this)) - balBefore < amount) revert ShortPull();
             require(IERC20Metadata(quote).transfer(msg.sender, get), TransferFailed());
         }
 
@@ -534,7 +540,7 @@ contract WeekendOptions is AquaApp {
     ///    the stale number).
     ///
     /// Then computes the raw (uncapped) holder shares. Every formula here floors
-    /// (`F.fullMulDiv`, never `fullMulDivUp`) — `collateralFor` stays the protocol's only Ceil.
+    /// (`F.fullMulDiv`, never `fullMulDivUp`) — there is no Ceil anywhere in the settlement block.
     function _resolveSettlement(Series storage s) internal view returns (SettleResult memory r) {
         (uint256 p, bool ok) = oracle.settlementPrice(s.underlying, s.expiry);
         if (!ok) {

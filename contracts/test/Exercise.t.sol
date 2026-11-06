@@ -12,6 +12,7 @@ import { OptionTokenFactory } from "../src/OptionToken.sol";
 import { V4SpotOracle } from "../src/oracle/V4SpotOracle.sol";
 import { MockERC20 } from "../src/mocks/MockERC20.sol";
 import { MockStateView } from "./helpers/MockStateView.sol";
+import { FeeOnTransferERC20 } from "./helpers/FeeOnTransferERC20.sol";
 
 /// @notice American physical exercise: any holder, any time before expiry, any amount up to
 ///         their balance, no oracle read. This is the product's headline claim — every other
@@ -250,6 +251,60 @@ contract ExerciseTest is Test {
 
         assertEq(nvdax.balanceOf(buyer), 10e18);
         assertEq(app.getSeries(id).token.balanceOf(buyer), 0);
+        assertEq(app.getSeries(id).poolUnderlying, 0);
+        assertEq(app.getSeries(id).poolCash, 2050e6);
+    }
+
+    // C1: unlike the write path (guarded by Rider B's `ShortPull`, proven above by
+    // `test_buyOption_revertsOnShortfallFromFeeOnTransferUnderlying` in Write.t.sol), a PUT's
+    // `exercise` leg pulls `s.underlying` directly from the exerciser via a bare
+    // `transferFrom` -- never through `AQUA.pull` -- so a fee-on-transfer underlying reaches the
+    // contract ONLY here, unmeasured. Without a matching guard, `poolUnderlying` is credited the
+    // full `amount` while only `amount - fee` actually lands, silently under-collateralizing the
+    // series until `claim` tries to pay out the phantom balance and reverts -- taking the
+    // writer's `writerCash` down with it too, since `_claim` is all-or-nothing across both legs.
+    function test_exercisePut_revertsOnShortfallFromFeeOnTransferUnderlying() public {
+        FeeOnTransferERC20 feeToken = new FeeOnTransferERC20("Fee NVDA", "fNVDAx", 18, 100); // 1% fee
+        oracle.setPool(address(feeToken), bytes32(uint256(2)), 18, true); // same stateView price
+
+        WeekendOptions.Strategy memory s = WeekendOptions.Strategy({
+            app: address(app),
+            maker: maker,
+            underlying: address(feeToken),
+            quote: address(usdc),
+            volWad: VOL,
+            minPremiumBps: 0,
+            maxSecondsToExpiry: 30 days,
+            salt: bytes32(0)
+        });
+        uint256 id = app.createSeries(address(feeToken), expiry, Kind.PUT, STRIKE);
+
+        // A PUT's collateral is quote cash -- `feeToken` never moves through Aqua's write path,
+        // so the maker only ever needs to ship usdc.
+        (, uint256 need) = app.collateralFor(id, 10e18);
+        usdc.mint(maker, need);
+        address[] memory tokens = new address[](1);
+        uint256[] memory amounts = new uint256[](1);
+        tokens[0] = address(usdc);
+        amounts[0] = need;
+        vm.startPrank(maker);
+        usdc.approve(address(aqua), type(uint256).max);
+        aqua.ship(address(app), abi.encode(s), tokens, amounts);
+        vm.stopPrank();
+
+        bytes32 hash = keccak256(abi.encode(s));
+        vm.prank(buyer);
+        taker.buy(app, s, id, 10e18, type(uint256).max, buyer, abi.encode(maker, hash));
+
+        // Buyer now holds 10e18 PUT options but can only deliver a fee-on-transfer "underlying".
+        feeToken.mint(buyer, 10e18);
+        vm.startPrank(buyer);
+        feeToken.approve(address(app), 10e18);
+        vm.expectRevert(WeekendOptions.ShortPull.selector);
+        app.exercise(id, 10e18);
+        vm.stopPrank();
+
+        // Refused before anything was booked: the whole exercise reverted.
         assertEq(app.getSeries(id).poolUnderlying, 0);
         assertEq(app.getSeries(id).poolCash, 2050e6);
     }

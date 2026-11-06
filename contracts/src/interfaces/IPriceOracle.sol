@@ -3,7 +3,8 @@ pragma solidity 0.8.30;
 
 /// @notice Prices are USDC (6 decimals) per 1e18 units of the asset, i.e. per share.
 interface IPriceOracle {
-    /// @notice Latest reference price. Used for display, quoting and vault rules. Never for exercise.
+    /// @notice Latest reference price. Used for display, quoting, and as the post-grace
+    /// settlement fallback (`_settle`). Never for exercise.
     function spot(address asset) external view returns (uint256 price, uint256 updatedAt);
 
     /// @notice Time-weighted settlement price for a given expiry. ok=false until it is final.
