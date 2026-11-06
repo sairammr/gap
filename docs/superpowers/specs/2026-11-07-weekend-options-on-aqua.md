@@ -143,6 +143,31 @@ typehash/nonce/cancellation surface), and sell-to-open.
 pooled gap/binary market, passkey accounts, Pyth, corporate-action multipliers. The SwapVM
 `WeekendGap` opcode stays deployed but unused (§12.9).
 
+## 7b. Deliberate drops from the source
+
+Each of these exists in the source protocol and is **absent here on purpose**. Recorded so a
+reviewer reads a decision rather than an omission.
+
+**No `allowedUnderlying` allowlist.** The source gated underlyings behind an owner allowlist.
+`WeekendOptions` has no owner, no `Ownable`, no `onlyOwner` — and an allowlist would introduce
+the first admin key, a privileged setter and a censorship surface, into a contract whose entire
+claim is that collateral never leaves the maker's wallet and nothing can be seized. The risk it
+mitigates, a series against a hostile token, is better handled by the fact that a series is
+inert until a maker voluntarily ships cover to it; such a maker has already chosen their
+counterparty risk. `underlying == quote` is rejected explicitly instead, as the source also did.
+
+**Fee-on-transfer is defended by a measured balance delta, not a comment.** The source measured
+what actually arrived so fee-on-transfer tokens could not under-collateralise a series.
+`AQUA.pull` does not measure, so `_buyOption` snapshots `balanceOf(address(this))` either side
+of the pull and reverts on shortfall. An unenforced "underlying must be non-rebasing" header
+comment protects nobody, and under-collateralising a series must fail loudly.
+
+**No `pause` / `guardian`.** A pause key on a non-upgradeable contract holding other people's
+collateral is a larger liability than the incidents it prevents, on series that live hours.
+
+**No `feeBps` / `treasury`.** No fee means no treasury address and no fee arithmetic anywhere
+in a payout path.
+
 ## 8. Deletion
 
 The capped-spread product is removed: `GapOptionsApp.sol`, its tests, its scripts, and
@@ -400,8 +425,11 @@ registers is checked. Treat that as the threat model.
 Present: `Deadline`, `Salt`, `DynamicBalances`, `RequireMinRate`, `Extruction`, `WeekendGap`,
 `JumpIfDirection`, token validators, `XYCSwap`, `PeggedSwap`, `FeeFlatIn`, `FeeProtocol`, `Decay`.
 
-**Absent: `StaticBalances`, `LimitSwap`, `InvalidateTokenIn`, `InvalidateTokenOut`, `Stop`,
-`Revert`, whitelists, `ValidateSeriesEpoch`, `OraclePriceAdjuster`.**
+**Not dispatched by `AquaOpcodes`: `StaticBalances`, `LimitSwap`, `InvalidateTokenIn`,
+`InvalidateTokenOut`, `Stop`, `Revert`, whitelists, `ValidateSeriesEpoch`,
+`OraclePriceAdjuster`.** They exist in the `Opcode` enum — upstream and fork alike — but the
+Aqua router's dispatcher does not handle them, so they are unusable here. Emitting one yields
+`UnknownOpcode`.
 
 `Extruction`'s own NatSpec prescribes `StaticBalances` + `InvalidateTokenIn/Out` to bound an
 amount-limited strategy. **All three are missing from the Aqua router.** An option-writing
@@ -504,15 +532,34 @@ test routed through it can have hooks. `MakerHooks.t.sol` is entirely non-Aqua.
 anything is deployed.** Build traits via `MakerTraitsLib.build` directly, as `MakerHooks.t.sol`
 does, not via `TraitsHelper`.
 
-### 12.9 `WeekendGap` opcode
+### 12.9 `WeekendGap` opcode — RESOLVED, no pre-deploy gate
 
-Left in place, unused. It sits in the live `AquaOpcodes` dispatcher ahead of `Extruction`, so
-every options fill pays one extra comparison — trivial, but it is not inert.
+Left in place, unused by this design.
 
-**Open risk:** whether slot `0x52` was free upstream is unproven from this repo (the fork landed
-in one commit with `WeekendGap` already at `0x52`, and `OpcodeEnumCheck.t.sol` pins neither
-`0x52` nor `0x53`). If upstream had `LimitSwap` at `0x52`, every previously-shipped strategy's
-bytes decode differently. **Diff against upstream `1inch/swap-vm` before deploying.**
+**The opcode-renumbering risk is closed.** The `Opcode` enum in
+`contracts/libs/OpcodeList.sol` was diffed slot-by-slot against upstream `1inch/swap-vm`.
+Both are 256 entries and **exactly one slot differs**:
+
+```
+0x52   upstream `_52` (reserved placeholder)   ->   fork `WeekendGap`
+```
+
+Every other slot is byte-identical, including the ones this section previously feared:
+
+| | upstream | fork |
+|---|---|---|
+| `Extruction` | `0x04` | `0x04` |
+| `InvalidateTokenIn` | `0x41` | `0x41` |
+| `LimitSwap` | `0x53` | `0x53` |
+| `StaticBalances` | `0x90` | `0x90` |
+
+So the stated worst case — that upstream held `LimitSwap` at `0x52` and every
+previously-shipped strategy would decode differently — **is false.** `WeekendGap` was dropped
+into a reserved placeholder, the one safe place it could have gone. **No pre-deploy diff
+remains outstanding; do not re-run it.**
+
+Residual cost, and now the whole story: `WeekendGap` sits ahead of `Extruction` in the
+`AquaOpcodes` if/else chain, so every options fill pays one extra comparison.
 
 ### 12.10 Order program
 
