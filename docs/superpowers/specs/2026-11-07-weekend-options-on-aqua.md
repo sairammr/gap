@@ -495,7 +495,8 @@ bytes decode differently. **Diff against upstream `1inch/swap-vm` before deployi
 Deadline  +  Salt  +  RequireMinRate  +  Extruction(WeekendPricer, args)
 ```
 
-`args = abi.encode(uint256 seriesId, uint256 volWad, uint8 side)`, carried in the program bytes
+`args = abi.encode(uint256 seriesId, uint256 volWad, uint16 minPremiumBps, uint8 side)` —
+128 bytes, instruction header `0x0494` — carried in the program bytes
 and therefore covered by the order hash. A maker cannot repoint pricing after shipping: a
 different target changes `order.data`, changes the hash, and the Aqua ledger key no longer
 exists — `safeBalances` reverts before any opcode runs.
