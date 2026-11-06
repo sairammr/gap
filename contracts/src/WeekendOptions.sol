@@ -98,6 +98,8 @@ contract WeekendOptions is AquaApp {
         uint256 indexed seriesId, address indexed to, address indexed maker, uint256 amount, uint256 premium
     );
 
+    event Exercised(uint256 indexed seriesId, address indexed holder, uint256 amount);
+
     // ---------------------------------------------------------------- errors
 
     error BadSeries();
@@ -112,6 +114,8 @@ contract WeekendOptions is AquaApp {
     error NoPrice();
     error ZeroPremium();
     error PremiumBelowFloor();
+    error NotExercisable();
+    error TransferFailed();
 
     constructor(address quote_, OptionTokenFactory factory_, IAqua aqua_, IPriceOracle oracle_) AquaApp(aqua_) {
         quote = quote_;
@@ -327,5 +331,50 @@ contract WeekendOptions is AquaApp {
     /// @dev WAD -> quote units.
     function _fromWad(uint256 x) internal view returns (uint256) {
         return F.fullMulDiv(x, quoteUnit, 1e18);
+    }
+
+    // ---------------------------------------------------------------- exercise
+
+    /// @notice American physical exercise: pay the strike and take the stock (CALL), or deliver
+    /// the stock and take the strike (PUT). Any holder, any time strictly before expiry, any
+    /// amount up to their balance.
+    /// @dev Reads no oracle. Every other settlement route in this protocol (quoting, settlement)
+    /// depends on a price; this one deliberately does not, because the whole point of a
+    /// physically-settled option is that the holder doesn't need a published price — they simply
+    /// name it themselves by paying the strike. That is what keeps this route open when the
+    /// underlying market, and so the oracle, is shut.
+    ///
+    /// Effects (burn, pool bookkeeping) happen before either ERC-20 leg moves.
+    function exercise(uint256 id, uint256 amount) external {
+        if (id >= _series.length) revert BadSeries();
+        Series storage s = _series[id];
+        // Unreachable while `Kind` has only CALL/PUT, kept for parity with the ported function
+        // and as a guard if a non-exercisable kind is ever added.
+        if (s.kind != Kind.CALL && s.kind != Kind.PUT) revert NotExercisable();
+        if (block.timestamp >= s.expiry) revert Expired();
+        if (amount == 0) revert BadAmount();
+
+        // Effects.
+        s.token.burn(msg.sender, amount);
+        if (s.kind == Kind.CALL) {
+            // Rounds UP, against the exerciser — matches `collateralFor`'s only-Ceil direction.
+            uint256 pay = F.fullMulDivUp(amount, s.strike, 1e18);
+            s.poolCash += pay;
+            s.poolUnderlying -= amount;
+
+            // Interactions.
+            require(IERC20Metadata(quote).transferFrom(msg.sender, address(this), pay), TransferFailed());
+            require(IERC20Metadata(s.underlying).transfer(msg.sender, amount), TransferFailed());
+        } else {
+            uint256 get = F.fullMulDiv(amount, s.strike, 1e18); // floors
+            s.poolUnderlying += amount;
+            s.poolCash -= get;
+
+            // Interactions.
+            require(IERC20Metadata(s.underlying).transferFrom(msg.sender, address(this), amount), TransferFailed());
+            require(IERC20Metadata(quote).transfer(msg.sender, get), TransferFailed());
+        }
+
+        emit Exercised(id, msg.sender, amount);
     }
 }
