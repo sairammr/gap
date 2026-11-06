@@ -762,7 +762,10 @@ pull. Only the token-out fee is.
 Both surfaced only on a short-dated series. Neither is a bug in the code; both are the
 pricing model meeting a tenor it was not calibrated for.
 
-**1. A constant `minPremiumBps` floor is unusable on a short tenor.** The floor is bps of
+**1. The flat floor crosses time value.** `minPremiumBps` is constant and time value is not, so
+the two intersect somewhere — and for weekend-length series that crossing point sits **inside
+the product's normal operating range**, not at a pathological edge. Having to ship at 1 bp was
+not a tuning accident; it is the floor being the wrong *shape* for the tenor. Concretely: The floor is bps of
 *strike notional*, which does not shrink as time value does. At 25 bps on a 100-strike series
 the floor is 0.25 quote/option — more than the entire time value of a 15-minute option, so a
 maker's own quote reverts `PremiumBelowFloor` against their own floor. The live run had to ship
@@ -770,7 +773,12 @@ the short ask at **1 bp**. **A real short-dated book needs the floor scaled to t
 constant. As it stands a maker running both a weekly and an intraday series cannot use one
 strategy for both.
 
-**2. The vol-only spread collapses to zero where it is needed most.** §12.5 says a two-sided
+**2. `volWad` stops being a lever once the premium is intrinsic.** Deep enough in the money,
+intrinsic value has no vol sensitivity, so the maker's only economic control does nothing. This
+is the same root as the `maxMoneynessBps` discussion in §10, seen from the maker's side rather
+than the attacker's: **a maker whose sole control is flat vol has no control in the wings** —
+which is exactly the fact that made a moneyness bound look attractive and then unworkable.
+Concretely: §12.5 says a two-sided
 maker expresses their spread by shipping a higher `volWad` on the ask than the bid. On an
 in-the-money short-dated call that fails completely: ask vol `0.6` and bid vol `0.4` both
 priced the live series at **exactly `5000000`**. Intrinsic dominates, the time-value
