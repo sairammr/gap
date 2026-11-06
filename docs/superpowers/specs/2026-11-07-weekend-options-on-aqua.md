@@ -249,6 +249,47 @@ because a CALL's `poolUnderlying` converts to `poolCash` as holders exercise (an
 versa for a PUT) — a closer takes a slice of whatever mix is left, not their original
 collateral.
 
+### OPEN HAZARD — `close` pro-rata is extractable (inherited from the source)
+
+`close` pays pro-rata of **both** pool legs on the **pre-decrement** `totalWritten`. Spec §10
+mandates that verbatim: *"a closer takes a slice of whatever mix is left, not their original
+collateral."* On a CALL series that has taken exercises, the pool holds
+`(W-X)` underlying **plus** `X*K` cash — so a writer who enters *after* those exercises buys
+into cash banked at the strike.
+
+Attacker writes `A` underlying, then immediately closes `A`:
+
+```
+outU = (W - X + A) * A / (W + A)
+outC = X * K * A   / (W + A)
+```
+
+`W=10, X=4, K=205, A=10` gives `outU = 8`, `outC = 410` against a cost of `10*S`:
+
+| spot | attacker | existing writers |
+|---|---|---|
+| 195 | **+20** | −20 |
+| 201 | **+8** | −8 |
+| 205 (= K) | 0 | 0 |
+| 210 | −10 | +10 |
+
+Profitable at **every spot below the strike**, and exactly zero-sum — the loss falls on
+existing writers, never on holders. Reachable through any write path (`buyOption`, a desk
+self-write, a third Aqua strategy), so **it cannot be avoided by choosing a different one.**
+
+**Not yet decided.** Both candidate fixes diverge from the source protocol, which is why this
+is recorded rather than patched:
+
+1. **Pay a closer in the leg they contributed**, not pro-rata of the mix. Closes the
+   extraction, but has its own asymmetry: a writer whose cover *was* exercised then gets back
+   less than they put in.
+2. **Bar `close` once the opposite leg is non-empty** (`poolCash != 0` on a CALL,
+   `poolUnderlying != 0` on a PUT). Sound and tiny, but disables early unwind after the first
+   exercise in the series.
+
+A fix that is exactly fair needs each writer's entry state recorded, which is real complexity.
+Until this is decided, treat `close` on a series that has taken exercises as live.
+
 ### `SETTLEMENT_GRACE = 7 days`
 
 `p == 0` ⇒ `hU = hC = 0` ⇒ writers take the entire pool and unexercised options settle
