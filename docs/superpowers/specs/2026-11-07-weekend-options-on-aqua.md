@@ -119,11 +119,29 @@ A Pyth-style time-weighted window is a later swap behind the same interface.
 **Keeper**
 11. Anyone can pay out holders and credit writers after expiry (`redeemFor` / `claimFor`).
 
-## 7. Explicitly out of scope
+## 7. Scope
 
-Two-sided order book, bids, sell-back, signed RFQ, maker bots, atomic hedging, vaults,
-`ShieldedLender`, the pooled gap/binary market, passkey accounts, Pyth, corporate-action
-multipliers, and the SwapVM `WeekendGap` opcode. None are part of the option mechanism.
+**Part I — the option mechanism.** Series, pooled collateral, CALL/PUT, American physical
+exercise, oracle-only-after-expiry settle, redeem/claim. Ported verbatim.
+
+**Part II — trading (§12).** Both directions, through the already-deployed
+`AquaSwapVMRouter`. A SwapVM order is the resting quote. Buying and selling back are both
+supported.
+
+> Note: an earlier revision of this section listed "two-sided order book, bids, sell-back"
+> as out of scope. That predates Part II and is superseded — trading is now in scope, but
+> delivered as SwapVM orders rather than as an on-chain CLOB.
+
+**Deliberately NOT an on-chain order book.** There is no quote array, no price-time priority,
+no automatic best-price walking, no eviction. Orders rest off-chain and a taker or solver picks
+which to fill — 1inch's model. Anything that assumes depth or a matching engine is out.
+
+**Deferred, not cut:** signed EIP-712 RFQ (a second fill path beside the book, with its own
+typehash/nonce/cancellation surface), and sell-to-open.
+
+**Out of scope:** maker bots, atomic hedging (`HedgedMaker`), vaults, `ShieldedLender`, the
+pooled gap/binary market, passkey accounts, Pyth, corporate-action multipliers. The SwapVM
+`WeekendGap` opcode stays deployed but unused (§12.9).
 
 ## 8. Deletion
 
