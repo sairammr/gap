@@ -116,7 +116,34 @@ decision, a rejected-alternatives list and an accepted-cost paragraph — for an
 is zero-sum *between writers* and never touches holders. This one takes value *from holders*,
 is cheaper to execute, and had three sentences arguing it away. Corrected here.
 
-### DECIDED: fix before deploy. Not acceptable as a known risk.
+### DECIDED BY THE USER: ACCEPTED RISK. Ships on `V4SpotOracle`.
+
+The user has accepted this exposure and the Pyth port is **not** a deploy blocker. Recorded
+here as an accepted risk rather than removed, so that what was accepted stays legible.
+
+**What is being accepted, precisely:**
+
+- Settlement price for every unexercised option is whatever `slot0` reads at a moment the
+  caller picks, locked irrevocably by the first `recordSettlement` call.
+- On a CALL, forcing it to `<= strike` pays in-the-money holders **nothing** and hands the pool
+  to writers. The loss is unbounded and the holder cannot defend.
+- Entry pricing is manipulable on the same root cause, since `spot()` feeds Black-Scholes on
+  every fill.
+
+**What bounds it in practice**, none of which are code:
+
+- Pool depth relative to position size. On a thin pool the attack is cheap; on a deep one the
+  round-trip slippage can exceed the payoff. **Nothing in the contracts enforces a minimum
+  depth, so this is an operational property, not a guarantee.**
+- A holder who exercises before expiry is untouched — `exercise` reads no oracle. The exposure
+  is only to positions left to settle.
+- On a testnet pool the protocol itself seeded, the attack is academic.
+
+**If this ever moves to mainnet or to a pool the protocol does not control, this decision needs
+revisiting.** The fix remains a 113-line swap behind the same `IPriceOracle`, described below,
+and nothing above that interface changes.
+
+### The fix, if it is ever wanted
 
 Unlike the §10 close guard, whose cost is a bounded liveness loss, **there is no bound on the
 loss here** — it is the whole in-the-money value of every unexercised position in the series,
@@ -283,14 +310,15 @@ supported.
 no automatic best-price walking, no eviction. Orders rest off-chain and a taker or solver picks
 which to fill — 1inch's model. Anything that assumes depth or a matching engine is out.
 
-**DEPLOY PREREQUISITE — `PythSettlementOracle`.** See §4. An earlier revision listed Pyth under
+**ACCEPTED RISK, not a blocker — `PythSettlementOracle` stays out of scope.** See §4: the user
+has accepted the manipulable-`spot()` exposure and this ships on `V4SpotOracle`. An earlier revision listed Pyth under
 "Out of scope" beside maker bots, vaults and passkey accounts. That grouping was the mistake:
 the others are product surface, this one is the mitigation for the only unbounded-loss hole in
 the protocol. The port kept the manipulable `slot0` reader and cut the hardened oracle the
 protocol being ported actually used. Deploying against `V4SpotOracle` as it stands is the
-accepted-unbounded-loss case, and §4 decides against accepting it.
+accepted-unbounded-loss case, and §4 records the user's decision to accept it.
 
-> **Supersedes two entries in the out-of-scope list below, not one.** `PythSettlementOracle`
+> Were it adopted, it would supersede two entries in the out-of-scope list, not one. `PythSettlementOracle`
 > is both a Pyth oracle and the carrier of `multiplierSource` / `IMultiplierToken` for
 > dividends and splits. Both `Pyth` and `corporate-action multipliers` are superseded by this
 > prerequisite. Recorded as an explicit supersession rather than a quiet deletion, because §7
