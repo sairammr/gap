@@ -36,12 +36,17 @@ contract WeekendOptions is AquaApp {
     /// There is deliberately no pool id or decimals here — the oracle owns pool configuration,
     /// so two makers quoting the same series differ only by `volWad`. Implied vol is the
     /// competitive axis, exactly as on a real options book.
+    ///
+    /// `minPremiumBps` is the maker's own floor, in bps of the strike notional. It exists
+    /// because Black-Scholes genuinely prices far-OTM options at zero (Ruling 11): the maker,
+    /// not the protocol, decides how little premium is worth locking their cover for.
     struct Strategy {
         address app;
         address maker;
         address underlying;
         address quote;
         uint256 volWad;
+        uint16 minPremiumBps;
         bytes32 salt;
     }
 
@@ -105,6 +110,8 @@ contract WeekendOptions is AquaApp {
     error InsufficientMakerCollateral();
     error StrategyMismatch();
     error NoPrice();
+    error ZeroPremium();
+    error PremiumBelowFloor();
 
     constructor(address quote_, OptionTokenFactory factory_, IAqua aqua_, IPriceOracle oracle_) AquaApp(aqua_) {
         quote = quote_;
@@ -176,6 +183,10 @@ contract WeekendOptions is AquaApp {
     function quotePremium(Strategy calldata s, uint256 seriesId, uint256 amount) public view returns (uint256) {
         Series storage ser = _series[seriesId];
         (uint256 spotQuote,) = oracle.spot(ser.underlying);
+        // A silent oracle is UNPRICEABLE, not free. Without this, a zero spot would quote 0 for
+        // every call (fine-looking, wrong) and `strike * amount` for every put (confidently
+        // absurd). `buyOption` refuses the same condition outright with `NoPrice()`.
+        if (spotQuote == 0) return 0;
 
         uint256 spotWad = _toWad(spotQuote);
         uint256 strikeWad = _toWad(ser.strike);
@@ -258,6 +269,13 @@ contract WeekendOptions is AquaApp {
         if (spotQuote == 0) revert NoPrice();
 
         premium = quotePremium(s, a.seriesId, a.amount);
+        // Maker-side floors, BEFORE the taker's ceiling. `GapPricing.normalCdf` returns exactly
+        // 0 beyond -8 sigma, so a far-OTM option genuinely prices to 0 — and `_safeCheckAquaPush`
+        // is a `>=`, so a premium of 0 is satisfied by a taker that pushes nothing at all. Left
+        // open, that lets anyone drain a maker's whole shipped cover into a worthless series for
+        // gas. The strategy bytes to do it are public: `Aqua.ship` emits them in `Shipped`.
+        if (premium == 0) revert ZeroPremium();
+        if (premium < _premiumFloor(s.minPremiumBps, ser.strike, a.amount)) revert PremiumBelowFloor();
         if (premium > a.maxPremium) revert PremiumTooHigh();
 
         (address token, uint256 need) = collateralFor(a.seriesId, a.amount);
@@ -290,6 +308,15 @@ contract WeekendOptions is AquaApp {
         (uint256 quoteBalBeforePush,) = AQUA.rawBalances(maker, address(this), hash, quote);
         IGapOptionCallback(msg.sender).gapOptionCallback(to, quote, premium, takerData);
         _safeCheckAquaPush(maker, hash, quote, quoteBalBeforePush + premium);
+    }
+
+    /// @notice The maker's minimum acceptable premium for `amount` options, in quote units.
+    /// @dev Taken off the STRIKE NOTIONAL (`amount * strike / 1e18`), not off the collateral:
+    /// collateral is underlying-denominated for a CALL and quote-denominated for a PUT, so bps
+    /// of it would mean two different things. The strike notional is quote-denominated for both,
+    /// which is what the premium is too. Both steps floor — `collateralFor` stays the only Ceil.
+    function _premiumFloor(uint16 minPremiumBps, uint256 strike, uint256 amount) internal pure returns (uint256) {
+        return F.fullMulDiv(F.fullMulDiv(amount, strike, 1e18), minPremiumBps, 10_000);
     }
 
     /// @dev quote units -> WAD.

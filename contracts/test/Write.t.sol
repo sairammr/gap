@@ -12,6 +12,7 @@ import { OptionTokenFactory } from "../src/OptionToken.sol";
 import { V4SpotOracle } from "../src/oracle/V4SpotOracle.sol";
 import { MockERC20 } from "../src/mocks/MockERC20.sol";
 import { MockStateView } from "./helpers/MockStateView.sol";
+import { NoOpTaker } from "./helpers/NoOpTaker.sol";
 
 /// @notice The Aqua write path: a maker ships cover, a buyer writes options against it.
 /// @dev Runs against the real `Aqua` contract, not a double. That matters: `ship` moves no
@@ -39,6 +40,8 @@ contract WriteTest is Test {
     address internal buyer = address(0xB0B);
 
     uint64 internal expiry;
+    /// @dev The maker's premium floor for the strategy under test. 0 unless a test sets it.
+    uint16 internal floorBps;
 
     function setUp() public {
         aqua = new Aqua();
@@ -71,6 +74,7 @@ contract WriteTest is Test {
             underlying: address(nvdax),
             quote: address(usdc),
             volWad: VOL,
+            minPremiumBps: floorBps,
             salt: bytes32(0)
         });
     }
@@ -210,6 +214,81 @@ contract WriteTest is Test {
         assertApproxEqRel(prem, 5.66e6, 0.05e18);
     }
 
+    /// @dev A deep-OTM call prices to EXACTLY zero: `GapPricing.normalCdf` returns 0 beyond
+    ///      -8 sigma, so at spot 205 / 7d / 50% vol any strike above ~1.76x spot is free. A
+    ///      taker paying nothing would otherwise seize 100% of the maker's shipped cover into a
+    ///      worthless series and lock it until expiry. The strategy bytes to mount this are
+    ///      public: `Aqua.ship` emits them.
+    function test_buy_zeroPremiumCannotSeizeTheMakersCover() public {
+        uint256 id = app.createSeries(address(nvdax), expiry, Kind.CALL, 500e6); // ~2.4x spot
+        _ship(maker, address(nvdax), 10e18);
+        assertEq(app.quotePremium(_strategy(), id, 10e18), 0, "8-sigma call really does price at 0");
+
+        NoOpTaker attacker = new NoOpTaker();
+        vm.expectRevert(WeekendOptions.ZeroPremium.selector);
+        attacker.buy(app, _strategy(), id, 10e18, address(attacker));
+
+        // Nothing moved: the cover is still the maker's.
+        assertEq(nvdax.balanceOf(maker), 10e18);
+        assertEq(nvdax.balanceOf(address(app)), 0);
+        assertEq(app.getSeries(id).poolUnderlying, 0);
+        assertEq(app.getSeries(id).totalWritten, 0);
+        assertEq(app.written(id, maker), 0);
+    }
+
+    /// @dev The symmetric PUT: `put = call - S + K` collapses to exactly 0 once `d2 >= +8`, so
+    ///      at spot 205 / 7d / 50% vol any strike below ~0.57x spot is free — and a PUT's cover
+    ///      is cash, so the seizure is of the maker's USDC.
+    function test_buy_zeroPremiumPutCannotSeizeTheMakersCash() public {
+        uint256 id = app.createSeries(address(nvdax), expiry, Kind.PUT, 50e6); // ~0.24x spot
+        _ship(maker, address(usdc), 500e6);
+        assertEq(app.quotePremium(_strategy(), id, 10e18), 0, "8-sigma put really does price at 0");
+
+        NoOpTaker attacker = new NoOpTaker();
+        vm.expectRevert(WeekendOptions.ZeroPremium.selector);
+        attacker.buy(app, _strategy(), id, 10e18, address(attacker));
+
+        assertEq(usdc.balanceOf(maker), 500e6);
+        assertEq(app.getSeries(id).poolCash, 0);
+        assertEq(app.written(id, maker), 0);
+    }
+
+    /// @dev Above the hard 8-sigma cliff sits a wide band of real-but-dust premiums. The floor
+    ///      is where the maker, not the protocol, says how little is worth locking cover for.
+    function test_buy_respectsTheMakersPremiumFloor() public {
+        // ATM 205 / 7d / 50% vol prices 10 options at ~56.6 USDC against a 2050 USDC strike
+        // notional — about 276 bps.
+        floorBps = 400; // ...so a 400 bps maker will not write this.
+        uint256 id = _callSeries();
+        _ship(maker, address(nvdax), 10e18);
+
+        uint256 prem = app.quotePremium(_strategy(), id, 10e18);
+        assertGt(prem, 0, "the premium is real, just below this maker's floor");
+        assertLt(prem, (2050e6 * 400) / 10_000, "below the 400 bps floor");
+
+        vm.expectRevert(WeekendOptions.PremiumBelowFloor.selector);
+        _buy(id, 10e18, buyer);
+        assertEq(app.getSeries(id).totalWritten, 0);
+
+        // A different floor is a different strategy hash, so the same maker can ship both.
+        // The identical trade clears once the floor is one this premium clears.
+        floorBps = 200;
+        _ship(maker, address(nvdax), 10e18);
+        _buy(id, 10e18, buyer);
+        assertEq(app.written(id, maker), 10e18);
+    }
+
+    /// @dev Finding 3: the router pins the app it forwards to. It holds a standing approval
+    ///      from every user, so the trust boundary is checked on the way in, not only on the
+    ///      way back.
+    function test_taker_refusesAForeignApp() public {
+        OptionTokenFactory otherFactory = new OptionTokenFactory();
+        WeekendOptions other = new WeekendOptions(address(usdc), otherFactory, IAqua(address(aqua)), oracle);
+        vm.prank(buyer);
+        vm.expectRevert(WeekendTaker.OnlyApp.selector);
+        taker.buy(other, _strategy(), 0, 1e18, type(uint256).max, buyer, "");
+    }
+
     /// @dev A silent oracle must not price options at zero. `spot` answers (0, 0) for an
     ///      uninitialised pool instead of reverting, which would otherwise make every call free
     ///      and lock the maker's cover for nothing.
@@ -221,6 +300,13 @@ contract WriteTest is Test {
         assertEq(app.quotePremium(_strategy(), id, 10e18), 0, "a silent oracle prices at zero");
         vm.expectRevert(WeekendOptions.NoPrice.selector);
         _buy(id, 10e18, buyer);
+
+        // The PUT half: without the guard this probe would answer `strike * amount` — a
+        // confidently absurd number rather than an honest "unpriceable".
+        uint256 putId = _putSeries();
+        assertEq(app.quotePremium(_strategy(), putId, 10e18), 0, "0 means unpriceable, not free");
+        vm.expectRevert(WeekendOptions.NoPrice.selector);
+        _buy(putId, 10e18, buyer); // refused before any collateral is touched
     }
 
     /// @dev The PUT leg of the write path: cash cover, `poolCash`, and `collateralFor`'s Ceil.

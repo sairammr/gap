@@ -45,6 +45,9 @@ contract WeekendTaker is IGapOptionCallback {
         address to,
         bytes calldata takerData
     ) external returns (uint256 premium) {
+        // This router holds a standing approval from every user who has ever bought through it,
+        // so the app it forwards to is pinned here and not merely checked on the way back in.
+        require(address(app) == APP, OnlyApp());
         payer = msg.sender;
         premium = app.buyOption(s, seriesId, amount, maxPremium, to, takerData);
         payer = address(0);
