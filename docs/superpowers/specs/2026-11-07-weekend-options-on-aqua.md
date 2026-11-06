@@ -84,7 +84,11 @@ function settlementPrice(address asset, uint64 expiry) external view returns (ui
 `spot` is for quoting and display — their comment: *"Never for exercise."* `settlementPrice`
 gates `settle`: `ok == false` until final.
 
-### CRITICAL — settlement is manipulable today, and it takes value from holders
+### CRITICAL — one root cause, three symptoms, one fix
+
+Everything below traces to a single defect: **`spot()` is an instantaneous, manipulable pool
+read.** It surfaces in three places — settlement, the grace fallback, and entry pricing — and
+`PythSettlementOracle` closes all three at once. Read it as one finding, not three.
 
 `V4SpotOracle.recordSettlement` is **permissionless**, callable by anyone at or after expiry,
 reads an **instantaneous** `slot0` through `spot()`, and is **irrevocable** — `recorded[asset][expiry]`
@@ -187,6 +191,50 @@ implementation, not in `_settle`, and nothing above `IPriceOracle` changes eithe
 the fix lands, the suite carries a test documenting the exposure (manipulated price below
 strike on an ITM CALL; holders redeem 0; writers take the pool) so it fails loudly rather than
 passing silently.
+
+## 4b. What the oracle fix does NOT close
+
+**A maker cannot decline a series.** `Strategy` carries `app`, `maker`, `underlying`, `quote`,
+`volWad`, `minPremiumBps`, `salt` — **no strike, no expiry, no kind, no series id.**
+`_buyOption` validates only `s.underlying == ser.underlying && s.quote == quote`. And
+`createSeries` is permissionless, accepts any `strike > 0`, and allows expiry out to **400
+days**.
+
+So a maker who ships cover is not exposed to a series they chose. They are exposed to **every
+series on that (underlying, quote) pair, including ones an attacker creates after the ship.**
+Their only lever is `volWad`, which scales the premium curve but cannot refuse a strike or a
+tenor.
+
+**Before the oracle fix this is an extraction**, and a faster one than the settlement hole:
+create a deep-ITM CALL, flash-depress the pool so the quoted premium collapses to the premium
+floor, `buyOption` against any shipped maker — they cannot refuse the series — then `exercise`
+in the same transaction, which reads no oracle, so the restored pool is irrelevant. Profit
+`(S − K) − premium`, with `K` the attacker's choice, bounded by the maker's `backable`. It
+never waits for expiry and never touches settlement. On the direct `buyOption` path there is no
+`RequireMinRate` either.
+
+That chain dies with the oracle port: it needs a manipulated `spot()` to collapse the premium,
+and against an honest spot a deep-ITM CALL prices at roughly `S − K`.
+
+**What survives the fix.** The theft is gone, but the attacker still chooses *where on the vol
+surface to transact* while the maker quotes one flat IV across every strike and tenor. They
+pick the point where that flat vol is most wrong, and the maker's cover backs it. Flat vol has
+no skew, so the wings are systematically mispriced — and nothing bounds tenor, so a `volWad`
+calibrated for an hours-long weekend series gets applied to a **400-day** series an attacker
+mints on the same pair.
+
+**This contradicts two claims made elsewhere in this document, and both are corrected here:**
+
+- §10 justifies accepting the close guard's liveness cost with *"these series live hours, not
+  months."* Nothing enforces that. The justification holds for the series this product intends
+  and fails for one an attacker mints.
+- §2.4 says makers differ only by `volWad`. True, and the problem: it is the only lever they
+  have, and it cannot decline a series.
+
+**Open design call, not decided here:** whether `Strategy` grows a tenor bound and a moneyness
+bound. It would change the struct, therefore `hashStrategy`, therefore every shipped strategy
+hash — **cheaper now than after any deployment.** Recorded as exposure; the fix is the user's
+call.
 
 ## 5. Reused from the existing repo
 
