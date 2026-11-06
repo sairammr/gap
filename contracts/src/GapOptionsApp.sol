@@ -7,6 +7,8 @@ import {ERC1155} from "@openzeppelin/contracts/token/ERC1155/ERC1155.sol";
 import {FixedPointMathLib as F} from "solady/utils/FixedPointMathLib.sol";
 import {IStateView} from "./interfaces/IStateView.sol";
 import {IGapOptionCallback} from "./interfaces/IGapOptionCallback.sol";
+import {UniV4Spot} from "./lib/UniV4Spot.sol";
+import {GapPricing} from "./lib/GapPricing.sol";
 
 /// @title GapOptionsApp
 /// @notice Aqua app for Gap options. Skeleton: strategy struct, hashing, and
@@ -92,7 +94,7 @@ contract GapOptionsApp is AquaApp, ERC1155 {
 
     /// @notice Buy a cash-settled (USDC) capped option against a maker's shipped
     ///         USDC collateral. The taker pays the premium in the callback.
-    /// @dev Premium is FIXED at capCollateral/10 for this task.
+    /// @dev Premium is priced via Black-Scholes off the v4 spot (see `quotePremium`).
     function buyOption(
         Strategy calldata s,
         uint8 kind,
@@ -127,7 +129,8 @@ contract GapOptionsApp is AquaApp, ERC1155 {
 
         // capCollateral (USDC 6dp) = cap * size / 1e30 (WAD*WAD -> 6dp).
         uint256 capCollateral = F.fullMulDiv(t.cap, t.size, 1e30);
-        uint256 premium = capCollateral / 10;
+        // Premium is priced via Black-Scholes off the v4 spot (quote units, e.g. 6dp USDC).
+        uint256 premium = quotePremium(s, t.kind, t.strike, t.cap, t.expiry, t.size);
         require(premium <= t.maxPremium, PremiumTooHigh());
 
         // Pull the collateral into the app (with a legible solvency pre-check).
@@ -188,6 +191,38 @@ contract GapOptionsApp is AquaApp, ERC1155 {
     /// @notice Strategy hash == the raw bytes Aqua hashes in `ship`.
     function hashStrategy(Strategy calldata s) public pure returns (bytes32) {
         return keccak256(abi.encode(s));
+    }
+
+    /// @notice Black-Scholes premium for one option, denominated in the quote
+    ///         token's own units (e.g. 6dp USDC).
+    /// @dev Spot is read from the v4 pool via `STATE_VIEW` and normalised to WAD
+    ///      quote-per-underlying. The WAD premium is scaled by `size` then
+    ///      converted WAD -> `s.quoteDecimals`. This is a `public view` probe, so
+    ///      `secondsToExpiry` floors to 0 (never underflows) when `expiry` has
+    ///      passed; `buyOption` separately guards `expiry > block.timestamp`.
+    /// @param s The maker strategy (supplies pool id, decimals, orientation, vol).
+    /// @param kind CALL (0) or PUT (1).
+    /// @param strike Strike price, WAD.
+    /// @param cap Maximum payoff per unit, WAD.
+    /// @param expiry Expiry timestamp (seconds).
+    /// @param size Option size, WAD.
+    /// @return premiumQuoteUnits Premium in quote-token units.
+    function quotePremium(
+        Strategy calldata s,
+        uint8 kind,
+        uint256 strike,
+        uint256 cap,
+        uint64 expiry,
+        uint256 size
+    ) public view returns (uint256 premiumQuoteUnits) {
+        uint256 spotWad = UniV4Spot.spotWad(
+            STATE_VIEW, s.poolId, s.underlyingDecimals, s.quoteDecimals, s.underlyingIsCurrency0
+        );
+        uint256 secondsToExpiry = expiry > block.timestamp ? expiry - block.timestamp : 0;
+        uint256 premWad = GapPricing.premium(kind, spotWad, strike, cap, secondsToExpiry, s.volWad);
+        // Apply size (WAD), then convert WAD -> quote-token units.
+        uint256 premWadSized = F.mulWad(premWad, size);
+        premiumQuoteUnits = F.mulDiv(premWadSized, 10 ** s.quoteDecimals, 1e18);
     }
 
     /// @dev Reverts unless the strategy is bound to this app.

@@ -7,6 +7,7 @@ import {Aqua} from "@1inch/aqua/contracts/Aqua.sol";
 import {GapOptionsApp} from "../src/GapOptionsApp.sol";
 import {IStateView} from "../src/interfaces/IStateView.sol";
 import {MockERC20} from "../src/mocks/MockERC20.sol";
+import {MockStateView} from "./helpers/MockStateView.sol";
 import {TakerStub} from "./helpers/TakerStub.sol";
 
 contract BuyOptionFixedTest is Test {
@@ -14,6 +15,7 @@ contract BuyOptionFixedTest is Test {
     GapOptionsApp internal app;
     MockERC20 internal nvdax;
     MockERC20 internal usdc;
+    MockStateView internal stateView;
     TakerStub internal stub;
 
     address internal maker = address(0xBEEF);
@@ -23,13 +25,16 @@ contract BuyOptionFixedTest is Test {
     uint256 internal constant CAP = 5e18;
     uint256 internal constant SIZE = 1e18;
     uint256 internal constant CAP_COLLATERAL = 5e6;
-    uint256 internal constant PREMIUM = 5e5; // capCollateral / 10
+
+    // sqrtPriceX96 yielding spotWad == 100e18 (18dp/6dp, underlyingIsCurrency0).
+    uint160 internal constant SQRT_PRICE_100 = 792281625142643375935439;
 
     function setUp() public {
         aqua = new Aqua();
         nvdax = new MockERC20("NVIDIA xStock", "NVDAx", 18);
         usdc = new MockERC20("USD Coin", "USDC", 6);
-        app = new GapOptionsApp(IAqua(address(aqua)), IStateView(address(0x5)));
+        stateView = new MockStateView(SQRT_PRICE_100);
+        app = new GapOptionsApp(IAqua(address(aqua)), IStateView(address(stateView)));
         stub = new TakerStub(IAqua(address(aqua)), address(app));
     }
 
@@ -70,31 +75,35 @@ contract BuyOptionFixedTest is Test {
         aqua.ship(address(app), abi.encode(s), _arr(address(usdc)), _amt(CAP_COLLATERAL));
 
         // Fund the taker stub with enough USDC for the premium.
-        usdc.mint(address(stub), 1e6);
+        usdc.mint(address(stub), 10e6);
 
         uint64 expiry = uint64(block.timestamp + 1 days);
         bytes memory takerData = abi.encode(maker, hash);
 
+        uint256 premium = app.quotePremium(s, 0 /*CALL*/, 100e18, CAP, expiry, SIZE);
+
         // Expect the Aqua Pulled event (USDC collateral out of maker).
         vm.expectEmit(true, true, true, true, address(aqua));
         emit IAqua.Pulled(maker, address(app), hash, address(usdc), CAP_COLLATERAL);
-        // Expect the Aqua Pushed event (premium into maker).
+        // Expect the Aqua Pushed event (priced premium into maker).
         vm.expectEmit(true, true, true, true, address(aqua));
-        emit IAqua.Pushed(maker, address(app), hash, address(usdc), PREMIUM);
+        emit IAqua.Pushed(maker, address(app), hash, address(usdc), premium);
+
+        uint256 stubBefore = usdc.balanceOf(address(stub));
 
         vm.prank(address(stub));
         uint256 positionId =
-            app.buyOption(s, 0 /*CALL*/, 100e18, CAP, expiry, SIZE, 1e6 /*maxPremium*/, buyerEOA, takerData);
+            app.buyOption(s, 0 /*CALL*/, 100e18, CAP, expiry, SIZE, 10e6 /*maxPremium*/, buyerEOA, takerData);
 
         // ERC-1155 minted to buyer.
         assertEq(app.balanceOf(buyerEOA, positionId), SIZE, "position balance");
 
         // Stub paid the premium.
-        assertEq(usdc.balanceOf(address(stub)), 1e6 - PREMIUM, "stub premium paid");
+        assertEq(usdc.balanceOf(address(stub)), stubBefore - premium, "stub premium paid");
 
-        // Maker's Aqua USDC balance: 5e6 shipped, pulled 5e6 -> 0, pushed 5e5 -> 5e5.
+        // Maker's Aqua USDC balance: 5e6 shipped, pulled 5e6 -> 0, pushed premium.
         (uint248 bal,) = aqua.rawBalances(maker, address(app), hash, address(usdc));
-        assertEq(uint256(bal), PREMIUM, "maker aqua balance");
+        assertEq(uint256(bal), premium, "maker aqua balance");
 
         // App now holds the full collateral.
         assertEq(usdc.balanceOf(address(app)), CAP_COLLATERAL, "app holds collateral");
@@ -141,13 +150,13 @@ contract BuyOptionFixedTest is Test {
         vm.prank(maker);
         aqua.ship(address(app), abi.encode(s), _arr(address(usdc)), _amt(1e6));
 
-        usdc.mint(address(stub), 1e6);
+        usdc.mint(address(stub), 10e6);
 
         uint64 expiry = uint64(block.timestamp + 1 days);
         bytes memory takerData = abi.encode(maker, hash);
 
         vm.prank(address(stub));
         vm.expectRevert(GapOptionsApp.InsufficientMakerCollateral.selector);
-        app.buyOption(s, 0, 100e18, CAP, expiry, SIZE, 1e6, buyerEOA, takerData);
+        app.buyOption(s, 0, 100e18, CAP, expiry, SIZE, 10e6, buyerEOA, takerData);
     }
 }
