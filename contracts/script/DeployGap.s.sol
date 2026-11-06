@@ -17,6 +17,7 @@ import {PoolSetup} from "./lib/PoolSetup.sol";
 import {UniV4Spot} from "../src/lib/UniV4Spot.sol";
 import {IStateView} from "../src/interfaces/IStateView.sol";
 import {GapOptionsApp} from "../src/GapOptionsApp.sol";
+import {GapTaker} from "../src/GapTaker.sol";
 import {MockERC20} from "../src/mocks/MockERC20.sol";
 
 /// @notice Minimal Permit2 surface needed to let the PositionManager pull tokens.
@@ -50,12 +51,22 @@ contract DeployGap is Script {
     uint24 internal constant FEE = 3000;
     int24 internal constant TICK_SPACING = 60;
 
+    string internal constant JSON_PATH = "./deployments/base-sepolia.json";
+
     // Target pool spot: 100 USDC per NVDAx (USDC 6dp, NVDAx 18dp).
     uint256 internal constant TARGET_SPOT_WAD = 100e18;
 
-    // Generous demo liquidity + collateral budgets.
+    // Budgets seeded INTO the v4 pool as liquidity. These leave the deployer's wallet.
     uint256 internal constant NVDAX_POOL_BUDGET = 1_000_000e18;
     uint256 internal constant USDC_POOL_BUDGET = 100_000_000e6;
+
+    // Budgets the deployer KEEPS after seeding. Load-bearing: Aqua's `ship` only records
+    // an accounting entry, the actual ERC20 transfer happens later at `pull` time out of
+    // the maker's wallet. If the mint equals the pool budget, the seed consumes the lot and
+    // the first `buyOption` reverts ERC20InsufficientBalance against a maker who looks, on
+    // Aqua's books, fully collateralised. Mint pool budget + wallet budget, not just one.
+    uint256 internal constant NVDAX_WALLET_BUDGET = 100_000e18;
+    uint256 internal constant USDC_WALLET_BUDGET = 10_000_000e6;
 
     /// @notice Everything the deploy produces, grouped to keep the stack shallow.
     struct Deployed {
@@ -63,6 +74,8 @@ contract DeployGap is Script {
         MockERC20 nvdax;
         MockERC20 usdc;
         GapOptionsApp app;
+        GapTaker taker;
+        address deployer;
         bytes32 poolId;
         bool underlyingIsCurrency0;
     }
@@ -79,7 +92,7 @@ contract DeployGap is Script {
             vm.startBroadcast();
         }
 
-        d = _deployCore();
+        d = _deployCore(deployer);
         d.underlyingIsCurrency0 = address(d.nvdax) < address(d.usdc);
         d.poolId = _setupPool(d, deployer);
 
@@ -90,16 +103,20 @@ contract DeployGap is Script {
     }
 
     /// @dev Deploy Aqua, both mocks, and the app; mint the pool + demo budgets to deployer.
-    function _deployCore() internal returns (Deployed memory d) {
+    function _deployCore(address deployer) internal returns (Deployed memory d) {
         d.aqua = new Aqua();
         d.nvdax = new MockERC20("NVIDIA xStock", "NVDAx", 18);
         d.usdc = new MockERC20("USD Coin", "USDC", 6);
         d.app = new GapOptionsApp(IAqua(address(d.aqua)), STATE_VIEW);
+        // Deployable form of DemoTaker: lets an EOA frontend route buyOption through a
+        // contract that implements IGapOptionCallback.
+        d.taker = new GapTaker(IAqua(address(d.aqua)), address(d.app));
+        d.deployer = deployer;
 
         // Mint generously so there is liquidity to seed the pool AND USDC for the
         // maker to ship as collateral (Ship.s.sol) and for takers to pay premiums.
-        d.nvdax.mint(msg.sender, NVDAX_POOL_BUDGET);
-        d.usdc.mint(msg.sender, USDC_POOL_BUDGET);
+        d.nvdax.mint(deployer, NVDAX_POOL_BUDGET + NVDAX_WALLET_BUDGET);
+        d.usdc.mint(deployer, USDC_POOL_BUDGET + USDC_WALLET_BUDGET);
     }
 
     /// @dev Init the v4 pool at ~100 USDC/NVDAx, then seed a full-range position.
@@ -191,9 +208,22 @@ contract DeployGap is Script {
 
     /// @dev Write deployments/base-sepolia.json. `poolId` is the load-bearing key.
     function _writeJson(Deployed memory d) internal {
+        // Snapshot keys owned by OTHER deploys before this total overwrite. The SwapVM router
+        // lives in /swap-vm-fork and is not redeployed here; dropping its key would leave the
+        // frontend reading `undefined` after every `DeployGap` run.
+        address swapVmRouter;
+        if (vm.exists(JSON_PATH)) {
+            string memory prev = vm.readFile(JSON_PATH);
+            if (vm.keyExistsJson(prev, ".swapVmRouter")) {
+                swapVmRouter = vm.parseJsonAddress(prev, ".swapVmRouter");
+            }
+        }
+
         string memory obj = "gap";
         vm.serializeAddress(obj, "aqua", address(d.aqua));
         vm.serializeAddress(obj, "gapOptionsApp", address(d.app));
+        vm.serializeAddress(obj, "gapTaker", address(d.taker));
+        vm.serializeAddress(obj, "maker", d.deployer);
         vm.serializeAddress(obj, "nvdax", address(d.nvdax));
         vm.serializeAddress(obj, "usdc", address(d.usdc));
         vm.serializeAddress(obj, "circleUsdc", CIRCLE_USDC);
@@ -203,7 +233,10 @@ contract DeployGap is Script {
         vm.serializeBytes32(obj, "poolId", d.poolId);
         string memory json = vm.serializeBool(obj, "underlyingIsCurrency0", d.underlyingIsCurrency0);
 
-        vm.writeJson(json, "./deployments/base-sepolia.json");
+        vm.writeJson(json, JSON_PATH);
+        if (swapVmRouter != address(0)) {
+            vm.writeJson(vm.toString(swapVmRouter), JSON_PATH, ".swapVmRouter");
+        }
         console2.log("Wrote deployments/base-sepolia.json");
     }
 }

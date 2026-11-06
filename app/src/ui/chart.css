@@ -1,0 +1,158 @@
+/* ============================================================================
+   Chart toolbars, modelled on kuru.io/trade's TradingView layout: an interval
+   and tool row on top, a drawing rail down the left, scale controls along the
+   bottom, and an OHLC legend inside the plot.
+   ========================================================================= */
+
+.ch { display: flex; flex-direction: column; min-width: 0; }
+
+/* --- top row -------------------------------------------------------------- */
+.ch-top {
+  display: flex; align-items: center; gap: 4px;
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--line);
+  flex-wrap: wrap;
+}
+.ch-sep { width: 1px; height: 20px; background: var(--line); margin: 0 4px; flex: none; }
+
+.ch-btn {
+  display: inline-flex; align-items: center; gap: 6px;
+  border: 0; background: transparent; cursor: pointer;
+  border-radius: var(--r-xs);
+  padding: 6px 9px;
+  font: 500 12.5px/16px var(--sans);
+  color: var(--ink-soft);
+  transition: background .13s, color .13s;
+  white-space: nowrap;
+}
+.ch-btn:hover { background: var(--surface-sunken); color: var(--ink); }
+.ch-btn[aria-pressed='true'], .ch-btn[aria-expanded='true'] { background: var(--ink); color: var(--surface); }
+.ch-btn:disabled { opacity: .35; cursor: not-allowed; }
+.ch-btn:focus-visible { outline: 2px solid var(--focus); outline-offset: 1px; }
+.ch-btn--icon { padding: 6px; }
+
+/* --- left drawing rail ---------------------------------------------------- */
+.ch-body { position: relative; display: flex; min-width: 0; }
+
+.ch-rail {
+  display: flex; flex-direction: column; gap: 2px;
+  padding: 6px 4px;
+  border-right: 1px solid var(--line);
+  flex: none;
+}
+.ch-rail .ch-btn { padding: 7px; }
+
+/* --- plot ----------------------------------------------------------------- */
+.ch-plot { position: relative; flex: 1; min-width: 0; height: 392px; }
+.ch-canvas { width: 100%; height: 100%; }
+
+/* Fullscreen lets the plot take whatever is left after the two toolbars. */
+.ch--full { display: flex; flex-direction: column; }
+.ch--full .ch-body { flex: 1; min-height: 0; }
+
+.ch-overlay {
+  position: absolute; inset: 0;
+  pointer-events: none;
+}
+.ch-overlay.is-armed { pointer-events: auto; cursor: crosshair; }
+.ch-overlay.is-erasing { cursor: not-allowed; }
+
+.ch-legend {
+  position: absolute; top: 8px; left: 10px; z-index: 3;
+  display: flex; flex-wrap: wrap; align-items: center; gap: 10px;
+  font: 500 11.5px/16px var(--mono);
+  font-variant-numeric: tabular-nums;
+  pointer-events: none;
+  color: var(--muted);
+}
+.ch-legend b { color: var(--ink); font-weight: 600; }
+.ch-legend__o { display: flex; gap: 7px; }
+.ch-legend__o span i { font-style: normal; color: var(--n-300); margin-right: 2px; }
+
+.ch-flag { position: absolute; top: 8px; right: 10px; z-index: 3; pointer-events: none; }
+
+/* --- bottom row ----------------------------------------------------------- */
+.ch-bottom {
+  display: flex; align-items: center; gap: 4px;
+  padding: 5px 8px;
+  border-top: 1px solid var(--line);
+  flex-wrap: wrap;
+}
+.ch-clock { font: 500 11.5px/16px var(--mono); color: var(--muted); font-variant-numeric: tabular-nums; }
+
+/* --- popovers ------------------------------------------------------------- */
+.ch-pop-wrap { position: relative; }
+.ch-pop {
+  position: absolute; top: calc(100% + 6px); left: 0; z-index: 25;
+  min-width: 190px;
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--r-sm);
+  box-shadow: var(--sh-lg);
+  padding: 5px;
+  display: flex; flex-direction: column; gap: 1px;
+  max-height: 320px; overflow-y: auto;
+}
+.ch-pop--right { left: auto; right: 0; }
+.ch-pop__h {
+  font: 500 10px/14px var(--mono); letter-spacing: .12em; text-transform: uppercase;
+  color: var(--muted); padding: 7px 9px 4px;
+}
+.ch-opt {
+  display: flex; align-items: center; justify-content: space-between; gap: 10px;
+  border: 0; background: transparent; cursor: pointer;
+  border-radius: var(--r-xs);
+  padding: 7px 9px;
+  font: 500 12.5px/16px var(--sans);
+  color: var(--ink-soft);
+  text-align: left; width: 100%;
+}
+.ch-opt:hover { background: var(--surface-sunken); color: var(--ink); }
+.ch-opt[aria-checked='true'] { color: var(--ink); font-weight: 600; }
+.ch-opt__sw { width: 10px; height: 10px; border-radius: 2px; flex: none; }
+.ch-opt__k { font: 500 10.5px/14px var(--mono); color: var(--n-300); }
+
+/* --- measure readout ------------------------------------------------------ */
+.ch-measure {
+  fill: var(--surface);
+  stroke: var(--ink);
+}
+.ch-measure__t { font: 600 11px var(--mono); fill: var(--ink); }
+
+/* --- fullscreen ----------------------------------------------------------- */
+.ch--full {
+  position: fixed; inset: 0; z-index: 80;
+  background: var(--surface);
+  border-radius: 0;
+}
+.ch--full .ch-plot { height: auto; }
+
+/* --- gap projection canvas ----------------------------------------------- */
+.gc { display: flex; flex-direction: column; gap: var(--s-3); }
+.gc__svg {
+  width: 100%; height: auto; display: block;
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  cursor: ns-resize;
+  touch-action: none;
+  background: var(--surface);
+}
+.gc__svg:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
+.gc__svg.is-dragging { cursor: grabbing; }
+.gc__axis { font: 400 10px var(--mono); fill: var(--n-300); }
+.gc__tag { font: 500 10.5px var(--mono); }
+.gc__label { font: 600 9.5px var(--mono); letter-spacing: 0.12em; fill: var(--muted); }
+.gc__val { font: 700 13px var(--mono); }
+
+.gc__read {
+  display: grid; gap: 1px;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  background: var(--line);
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  overflow: hidden;
+}
+.gc__cell { background: var(--surface); padding: 11px 14px; display: flex; flex-direction: column; gap: 2px; }
+.gc__k { font: var(--t-caption); color: var(--muted); }
+.gc__v { font: 600 17px/24px var(--mono); font-variant-numeric: tabular-nums; }
+.gc__hint { margin: 0; font: var(--t-body-s); color: var(--muted); line-height: 1.6; }

@@ -152,8 +152,7 @@ contract GapOptionsApp is AquaApp, ERC1155 {
 
         bytes32 hash = hashStrategy(s);
 
-        // capCollateral (USDC 6dp) = cap * size / 1e30 (WAD*WAD -> 6dp).
-        uint256 capCollateral = F.fullMulDiv(t.cap, t.size, 1e30);
+        uint256 capCollateral = capBacking(t.cap, t.size);
         // Premium is priced via Black-Scholes off the v4 spot (quote units, e.g. 6dp USDC).
         uint256 premium = quotePremium(s, t.kind, t.strike, t.cap, t.expiry, t.size);
         require(premium <= t.maxPremium, PremiumTooHigh());
@@ -248,6 +247,91 @@ contract GapOptionsApp is AquaApp, ERC1155 {
         // Apply size (WAD), then convert WAD -> quote-token units.
         uint256 premWadSized = F.mulWad(premWad, size);
         premiumQuoteUnits = F.mulDiv(premWadSized, 10 ** s.quoteDecimals, 1e18);
+    }
+
+    /// @notice Collateral (quote-token units) a position of these terms locks from the maker.
+    /// @dev capBacking = cap * size / 1e30 (WAD * WAD -> 6dp). The single definition used by
+    ///      `_buyOption`'s pull and by `quoteBest`'s solvency filter — a quote that applies a
+    ///      different threshold than the buy would hand out unfillable quotes.
+    function capBacking(uint256 cap, uint256 size) public pure returns (uint256) {
+        return F.fullMulDiv(cap, size, 1e30);
+    }
+
+    /// @notice How much quote-token backing a maker can ACTUALLY honour under this strategy.
+    /// @dev The `min` is the whole point of this function.
+    ///
+    ///      `AQUA.ship` only writes an accounting entry. No ERC-20 moves at ship time — the
+    ///      tokens leave the maker's own wallet later, when the app calls `AQUA.pull` inside
+    ///      `buyOption`. So the two numbers below are independent and can disagree:
+    ///
+    ///        aquaCommitted — what Aqua's books say the maker has promised this strategy
+    ///        walletBalance — what the maker's wallet can actually deliver at pull time
+    ///
+    ///      When `walletBalance < aquaCommitted` the maker looks fully collateralised on
+    ///      Aqua's books and `buyOption` still reverts deep inside Aqua with
+    ///      `ERC20InsufficientBalance`. We hit exactly that on the live Base Sepolia deploy
+    ///      (shipped collateral whose backing had been spent seeding the v4 pool). Solvency is
+    ///      therefore the MINIMUM of the promise and the means, never either one alone.
+    /// @return aquaCommitted Collateral committed to this strategy on Aqua's books.
+    /// @return walletBalance The maker's actual quote-token wallet balance.
+    /// @return backable min(aquaCommitted, walletBalance) — what a buy can really pull.
+    function makerCapacity(Strategy calldata s)
+        public
+        view
+        returns (uint256 aquaCommitted, uint256 walletBalance, uint256 backable)
+    {
+        (uint248 committed,) = AQUA.rawBalances(s.maker, address(this), hashStrategy(s), s.quote);
+        aquaCommitted = uint256(committed);
+        walletBalance = IERC20(s.quote).balanceOf(s.maker);
+        backable = aquaCommitted < walletBalance ? aquaCommitted : walletBalance;
+    }
+
+    /// @notice Cheapest solvent maker for a set of candidate strategies.
+    /// @dev Aqua IS the order book: every maker who ever shipped is recoverable from
+    ///      `IAqua.Shipped(maker, app, strategyHash, strategy)` logs, which carry the full
+    ///      abi-encoded `Strategy`. A caller decodes those into `ss` and asks this function
+    ///      who is cheapest — no registry, no indexer, no CLOB.
+    ///
+    ///      `quotePremium` never reads `s.maker`, so two makers quoting the same terms differ
+    ///      only by their `volWad`. That is deliberate: implied vol is the competitive axis
+    ///      makers undercut each other on, exactly as they would on a real options book.
+    ///
+    ///      A candidate is skipped if it is not bound to this app, or if its `backable`
+    ///      (see `makerCapacity`) cannot cover `capBacking(cap, size)` — the same threshold
+    ///      `_buyOption` pulls at, so a returned quote is one that can actually be filled.
+    /// @return bestIndex Index into `ss`, or `type(uint256).max` when nobody qualifies.
+    /// @return bestPremium Premium in quote-token units, 0 when nobody qualifies.
+    /// @return bestMaker The winning maker, `address(0)` when nobody qualifies.
+    function quoteBest(
+        Strategy[] calldata ss,
+        uint8 kind,
+        uint256 strike,
+        uint256 cap,
+        uint64 expiry,
+        uint256 size
+    ) external view returns (uint256 bestIndex, uint256 bestPremium, address bestMaker) {
+        // Sentinel up front: no revert on an empty market, the frontend renders
+        // "no maker available" instead of eating a failed call.
+        bestIndex = type(uint256).max;
+        uint256 need = capBacking(cap, size);
+
+        for (uint256 i; i < ss.length; ++i) {
+            if (!_isSolvent(ss[i], need)) continue;
+            uint256 premium = quotePremium(ss[i], kind, strike, cap, expiry, size);
+            if (bestIndex == type(uint256).max || premium < bestPremium) {
+                bestIndex = i;
+                bestPremium = premium;
+                bestMaker = ss[i].maker;
+            }
+        }
+    }
+
+    /// @dev Candidate filter for `quoteBest`, extracted to keep that loop's stack shallow
+    ///      (this file is compiled without via_ir).
+    function _isSolvent(Strategy calldata s, uint256 need) internal view returns (bool) {
+        if (s.app != address(this)) return false;
+        (,, uint256 backable) = makerCapacity(s);
+        return backable >= need;
     }
 
     /// @dev Reverts unless the strategy is bound to this app.

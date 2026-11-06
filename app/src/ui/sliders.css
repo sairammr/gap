@@ -1,0 +1,46 @@
+/* ============================================================================
+   Sliders — built in the spirit of the bencho.dev/bench slider blocks
+   (wake, elastic, tape, budget, range-over-histogram), written from scratch
+   against the Voltrex tokens. Pointer + keyboard driven, ARIA slider roles.
+   ========================================================================= */
+
+.vx-slider { display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+.vx-slider__head { display: flex; align-items: baseline; justify-content: space-between; gap: var(--s-2); }
+.vx-slider__label { font: var(--t-body-s); color: var(--muted); }
+.vx-slider__value { font: 600 22px/28px var(--sans); font-variant-numeric: tabular-nums; letter-spacing: -0.01em; }
+.vx-slider__scale {
+  display: flex; justify-content: space-between;
+  font: 400 11px/14px var(--mono); color: var(--n-300);
+  font-variant-numeric: tabular-nums;
+}
+.vx-slider[data-disabled='true'] { opacity: .5; pointer-events: none; }
+
+/* --- Wake slider ---------------------------------------------------------
+   Thumbless bar field. Bars you sweep past spring up and settle back, so the
+   drag leaves a visible wake. Speed of the drag sets how high they lift.      */
+.vx-wake {
+  position: relative;
+  display: flex; align-items: flex-end; gap: 3px;
+  height: 46px;
+  padding: 0 2px;
+  cursor: ew-resize;
+  touch-action: none;
+  outline: none;
+}
+.vx-wake:focus-visible { outline: 2px solid var(--focus); outline-offset: 6px; border-radius: var(--r-xs); }
+.vx-wake__bar {
+  flex: 1 1 0;
+  min-width: 2px;
+  height: 14px;
+  border-radius: 2px;
+  background: var(--n-200);
+  transform-origin: bottom center;
+  will-change: transform;
+  transition: background .12s linear, height .12s ease;
+}
+.vx-wake__bar.is-on { height: 30px; background: var(--accent); }
+.vx-wake__bar.is-head { background: var(--brand-teal); }
+.vx-wake__readout {
+  position: absolute; top: -2px; right: 0;
+  font: 500 11px/14px var(--mono); color: var(--muted);
+}

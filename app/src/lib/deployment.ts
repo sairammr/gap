@@ -8,9 +8,23 @@
 
 export const BASE_SEPOLIA_CHAIN_ID = 84532
 
+/**
+ * A maker who has shipped collateral into Aqua. Optional: the deploy script only
+ * started writing this array recently, so every read must degrade to the single
+ * top-level `maker` + default vol when it is absent.
+ */
+export interface MakerEntry {
+  address: string
+  /** Annualised IV as a WAD integer, e.g. "500000000000000000" for 50%. */
+  volWad: string | number
+  salt?: string
+}
+
 export interface Deployment {
   aqua: string
   gapOptionsApp: string
+  /** The party that shipped the collateral. The Strategy tuple hashes against it. */
+  maker: string
   nvdax: string
   usdc: string
   circleUsdc: string
@@ -19,9 +33,13 @@ export interface Deployment {
   stateView: string
   poolId: string
   underlyingIsCurrency0: boolean
-  // Optional: the GapTaker helper the UI routes buys through. Not written by the
-  // current deploy script; absent until a taker helper is deployed.
+  // The GapTaker helper the UI routes buys through.
   gapTaker?: string
+  /** Written by the deploy once makers ship. Absent on older deployment JSON. */
+  makers?: MakerEntry[]
+  /** Block the app was deployed in — where the OptionBought log scan starts.
+   *  Absent on older JSON; usePositions falls back to a build-time constant. */
+  deployBlock?: number | string
 }
 
 const ZERO_POOL_ID = '0x0000000000000000000000000000000000000000000000000000000000000000'

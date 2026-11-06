@@ -1,0 +1,126 @@
+/* ============================================================================
+   Voltrex-derived design tokens — light trading-desk theme.
+   Scales lifted from the UI-kit reference board: 01 Colors, 02 Typography,
+   18 Border Radius, 19 Shadows.
+   ========================================================================= */
+
+:root {
+  /* -- brand ------------------------------------------------------------- */
+  --brand-teal: #14ccbb;
+  --brand-amber: #ffb020;
+  --brand-violet: #7b61ff;
+  --brand-green: #22c55e;
+  --brand-red: #ef4444;
+
+  /* -- neutral ramp ------------------------------------------------------ */
+  --n-900: #0f172a;
+  --n-700: #334155;
+  --n-500: #64748b;
+  --n-300: #cbd5e1;
+  --n-200: #e2e8f0;
+  --n-100: #f1f5f9;
+  --n-50: #ffffff;
+
+  /* -- semantic ---------------------------------------------------------- */
+  --bg: #fbfbfa;
+  --grid-line: #dcdfe4;
+  --surface: #ffffff;
+  --surface-sunken: #f7f8fa;
+  --surface-raised: #ffffff;
+  --ink: var(--n-900);
+  --ink-soft: var(--n-700);
+  --muted: var(--n-500);
+  --line: var(--n-200);
+  --line-strong: var(--n-300);
+
+  --up: #22c55e;
+  --down: #ef4444;
+  --candle-up: #22c55e;
+  --candle-down: #f5c84b;
+
+  --up-wash: rgba(34, 197, 94, 0.12);
+  --down-wash: rgba(239, 68, 68, 0.12);
+  --teal-wash: rgba(20, 204, 187, 0.12);
+  --amber-wash: rgba(255, 176, 32, 0.14);
+  --violet-wash: rgba(123, 97, 255, 0.12);
+
+  --accent: var(--n-900);          /* primary action = near-black pill */
+  --accent-ink: #ffffff;
+  --focus: var(--brand-teal);
+
+  /* -- type -------------------------------------------------------------- */
+  /* General Sans is the closest free stand-in for onverre's Isolation
+     Grotesque — tall x-height, open humanist curves. Plus Jakarta Sans is the
+     loaded fallback in case Fontshare is unreachable. Mono stays JetBrains,
+     which onverre also uses for data labels. */
+  --sans: 'General Sans', 'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+  --mono: 'JetBrains Mono', ui-monospace, 'SF Mono', Menlo, monospace;
+
+  --t-display: 700 44px/52px var(--sans);
+  --t-h1: 600 28px/36px var(--sans);
+  --t-h2: 600 20px/28px var(--sans);
+  --t-h3: 500 16px/24px var(--sans);
+  --t-body-l: 400 14px/22px var(--sans);
+  --t-body: 400 14px/20px var(--sans);
+  --t-body-s: 400 12px/18px var(--sans);
+  --t-caption: 400 11px/16px var(--sans);
+
+  /* -- radius ------------------------------------------------------------ */
+  --r-xs: 6px;
+  --r-sm: 8px;
+  --r-md: 12px;
+  --r-lg: 14px;
+  --r-xl: 18px;
+  --r-2xl: 24px;
+  --r-3xl: 32px;
+  --r-pill: 999px;
+
+  /* -- shadow ------------------------------------------------------------ */
+  --sh-xs: 0 1px 2px rgba(16, 24, 40, 0.05);
+  --sh-sm: 0 4px 12px rgba(16, 24, 40, 0.06);
+  --sh-md: 0 8px 24px rgba(16, 24, 40, 0.08);
+  --sh-lg: 0 16px 40px rgba(16, 24, 40, 0.1);
+  --sh-xl: 0 24px 64px rgba(16, 24, 40, 0.12);
+
+  /* -- space ------------------------------------------------------------- */
+  --s-1: 4px;
+  --s-2: 8px;
+  --s-3: 12px;
+  --s-4: 16px;
+  --s-5: 20px;
+  --s-6: 24px;
+  --s-8: 32px;
+
+  color-scheme: light;
+}
+
+* { box-sizing: border-box; }
+
+html, body, #root { height: 100%; }
+
+body {
+  margin: 0;
+  font: var(--t-body);
+  letter-spacing: -0.005em;
+  color: var(--ink);
+  background: var(--bg);
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+/* The soft tinted wash behind the desk, as in the reference shot. */
+.vx-backdrop {
+  min-height: 100%;
+  background-color: var(--bg);
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='120' height='120'%3E%3Cg stroke='%23dcdfe4' stroke-width='1' stroke-dasharray='3 6'%3E%3Cpath d='M0.5 0V120'/%3E%3Cpath d='M0 0.5H120'/%3E%3C/g%3E%3C/svg%3E");
+  background-size: 120px 120px;
+}
+
+::selection { background: var(--teal-wash); }
+
+:where(button, input, select, textarea) { font: inherit; color: inherit; }
+
+:where(a) { color: inherit; }
+
+.mono { font-family: var(--mono); font-variant-numeric: tabular-nums; }
+.num { font-variant-numeric: tabular-nums; }

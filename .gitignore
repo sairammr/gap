@@ -9,3 +9,18 @@ swap-vm-fork/coverage/
 swap-vm-fork/coverage.json
 swap-vm-fork/.env
 swap-vm-fork/ignition/deployments/chain-31337/
+
+# Secrets — never commit
+.env
+.env.*
+contracts/.env
+app/.env
+app/.env.local
+
+# Foundry build artifacts
+contracts/out/
+contracts/cache/
+contracts/broadcast/
+contracts/node_modules/
+app/node_modules/
+app/dist/

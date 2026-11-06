@@ -25,6 +25,11 @@ const strategyArg = {
   components: strategyComponents,
 } as const
 
+/** Param list for `encodeAbiParameters` — the bytes `AQUA.ship` wants for the
+ *  strategy. Solidity's `abi.encode(strategy)` of this all-static struct is byte
+ *  for byte the same, which is why Aqua's returned hash equals hashStrategy. */
+export const strategyAbiParams = [strategyArg] as const
+
 export const gapOptionsAppAbi = [
   {
     type: 'function',
@@ -171,6 +176,16 @@ export const erc20Abi = [
   },
   {
     type: 'function',
+    name: 'allowance',
+    stateMutability: 'view',
+    inputs: [
+      { name: 'owner', type: 'address' },
+      { name: 'spender', type: 'address' },
+    ],
+    outputs: [{ name: '', type: 'uint256' }],
+  },
+  {
+    type: 'function',
     name: 'approve',
     stateMutability: 'nonpayable',
     inputs: [
@@ -179,12 +194,24 @@ export const erc20Abi = [
     ],
     outputs: [{ name: '', type: 'bool' }],
   },
+  // Testnet-only: the mock USDC/NVDAx expose a permissionless mint so a fresh
+  // wallet can fund itself. Not present on real USDC.
+  {
+    type: 'function',
+    name: 'mint',
+    stateMutability: 'nonpayable',
+    inputs: [
+      { name: 'to', type: 'address' },
+      { name: 'amount', type: 'uint256' },
+    ],
+    outputs: [],
+  },
 ] as const
 
 // GapTaker: a small helper contract the UI calls so that msg.sender implements
-// IGapOptionCallback (an EOA cannot call buyOption directly — see README). This
-// mirrors DemoTaker.buy in contracts/script/Demo.s.sol. It is NOT yet deployed;
-// its address would be recorded in the deployment JSON under `gapTaker`.
+// IGapOptionCallback (an EOA cannot call buyOption directly — see README). The
+// helper pulls the premium with `quote.transferFrom(payer, ...)`, so the caller
+// MUST approve it for at least maxPremium first. Address: deployment `gapTaker`.
 export const gapTakerAbi = [
   {
     type: 'function',
@@ -203,5 +230,48 @@ export const gapTakerAbi = [
       { name: 'takerData', type: 'bytes' },
     ],
     outputs: [{ name: 'positionId', type: 'uint256' }],
+  },
+] as const
+
+// 1inch Aqua — the shared liquidity layer. Collateral never leaves the maker's
+// wallet on `ship`; it is an accounting entry that `pull` later draws against.
+// Signatures copied from @1inch/aqua/contracts/interfaces/IAqua.sol.
+export const aquaAbi = [
+  {
+    type: 'function',
+    name: 'ship',
+    stateMutability: 'nonpayable',
+    inputs: [
+      { name: 'app', type: 'address' },
+      { name: 'strategy', type: 'bytes' },
+      { name: 'tokens', type: 'address[]' },
+      { name: 'amounts', type: 'uint256[]' },
+    ],
+    outputs: [{ name: 'strategyHash', type: 'bytes32' }],
+  },
+  {
+    type: 'function',
+    name: 'rawBalances',
+    stateMutability: 'view',
+    inputs: [
+      { name: 'maker', type: 'address' },
+      { name: 'app', type: 'address' },
+      { name: 'strategyHash', type: 'bytes32' },
+      { name: 'token', type: 'address' },
+    ],
+    outputs: [
+      { name: 'balance', type: 'uint248' },
+      { name: 'tokensCount', type: 'uint8' },
+    ],
+  },
+  {
+    type: 'event',
+    name: 'Shipped',
+    inputs: [
+      { name: 'maker', type: 'address', indexed: false },
+      { name: 'app', type: 'address', indexed: false },
+      { name: 'strategyHash', type: 'bytes32', indexed: false },
+      { name: 'strategy', type: 'bytes', indexed: false },
+    ],
   },
 ] as const

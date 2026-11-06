@@ -1,19 +1,56 @@
-import { StrictMode } from 'react'
+import { StrictMode, lazy, Suspense, useEffect, useState } from 'react'
 import { createRoot } from 'react-dom/client'
-import { WagmiProvider } from 'wagmi'
+import { PrivyProvider } from '@privy-io/react-auth'
+import { WagmiProvider } from '@privy-io/wagmi'
+import { baseSepolia } from 'wagmi/chains'
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
-import './index.css'
+import './ui'
 import App from './App.tsx'
 import { wagmiConfig } from './lib/wagmi.ts'
 
+// #kit opens the UI-kit board. One hash check beats pulling in a router.
+const Kit = lazy(() => import('./pages/Kit.tsx'))
+
+function Root() {
+  const [hash, setHash] = useState(() => location.hash)
+  useEffect(() => {
+    const onHash = () => setHash(location.hash)
+    addEventListener('hashchange', onHash)
+    return () => removeEventListener('hashchange', onHash)
+  }, [])
+  return hash === '#kit' ? (
+    <Suspense fallback={null}>
+      <Kit />
+    </Suspense>
+  ) : (
+    <App />
+  )
+}
+
 const queryClient = new QueryClient()
+
+// The Privy APP ID is a public client credential — it ships in the bundle by
+// design. The Privy APP SECRET is server-side only and must never appear here.
+const PRIVY_APP_ID = import.meta.env.VITE_PRIVY_APP_ID || 'cmw52dk9i03lm0gjsgf2qy053'
 
 createRoot(document.getElementById('root')!).render(
   <StrictMode>
-    <WagmiProvider config={wagmiConfig}>
+    <PrivyProvider
+      appId={PRIVY_APP_ID}
+      config={{
+        defaultChain: baseSepolia,
+        supportedChains: [baseSepolia],
+        // External wallets, plus an embedded wallet for visitors with none.
+        loginMethods: ['wallet', 'email'],
+        embeddedWallets: { ethereum: { createOnLogin: 'users-without-wallets' } },
+        appearance: { theme: 'dark', accentColor: '#7b61ff', walletChainType: 'ethereum-only' },
+      }}
+    >
       <QueryClientProvider client={queryClient}>
-        <App />
+        <WagmiProvider config={wagmiConfig}>
+          <Root />
+        </WagmiProvider>
       </QueryClientProvider>
-    </WagmiProvider>
+    </PrivyProvider>
   </StrictMode>,
 )

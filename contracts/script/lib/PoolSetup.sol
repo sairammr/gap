@@ -66,6 +66,10 @@ library PoolSetup {
         // SETTLE_PAIR: (currency0, currency1) — pulls owed amounts from the caller via Permit2.
         params[1] = abi.encode(key.currency0, key.currency1);
 
-        posm.modifyLiquidities(abi.encode(actions, params), block.timestamp + 1);
+        // Deadline margin is load-bearing: under `forge script` `block.timestamp` is the
+        // SIMULATION block's, but the tx is broadcast and mined minutes later. A
+        // `block.timestamp + 1` deadline is already stale on arrival and the
+        // PositionManager reverts `DeadlinePassed`. An hour covers simulate->mine drift.
+        posm.modifyLiquidities(abi.encode(actions, params), block.timestamp + 1 hours);
     }
 }

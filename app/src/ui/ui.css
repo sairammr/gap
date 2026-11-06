@@ -1,0 +1,745 @@
+/* ============================================================================
+   Voltrex UI kit — component styles. Pairs with tokens.css.
+   Section numbers mirror the reference board.
+   ========================================================================= */
+
+/* --- 03. Buttons ---------------------------------------------------------- */
+.vx-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--s-2);
+  border-radius: var(--r-pill);
+  border: 1px solid transparent;
+  padding: 10px 18px;
+  font: 500 14px/20px var(--sans);
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background .15s, border-color .15s, color .15s, box-shadow .15s, transform .08s;
+}
+.vx-btn:active:not(:disabled) { transform: translateY(1px); }
+.vx-btn:disabled { opacity: .45; cursor: not-allowed; }
+.vx-btn:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
+
+.vx-btn--primary { background: var(--accent); color: var(--accent-ink); box-shadow: var(--sh-sm); }
+.vx-btn--primary:hover:not(:disabled) { background: #000; }
+
+.vx-btn--secondary { background: var(--surface); color: var(--ink); border-color: var(--line); box-shadow: var(--sh-xs); }
+.vx-btn--secondary:hover:not(:disabled) { border-color: var(--line-strong); }
+
+.vx-btn--tertiary { background: var(--surface-sunken); color: var(--ink-soft); border-color: transparent; }
+.vx-btn--tertiary:hover:not(:disabled) { background: var(--n-100); }
+
+.vx-btn--ghost { background: transparent; color: var(--ink-soft); }
+.vx-btn--ghost:hover:not(:disabled) { background: var(--surface-sunken); }
+
+.vx-btn--danger { background: var(--down); color: #fff; }
+.vx-btn--danger:hover:not(:disabled) { background: #dc2626; }
+
+/* onverre's nav action: square corners, hairline border, no fill. */
+.vx-btn--square {
+  border-radius: var(--r-xs);
+  background: var(--surface);
+  color: var(--ink);
+  border-color: var(--ink);
+  box-shadow: none;
+}
+.vx-btn--square:hover:not(:disabled) { background: var(--ink); color: var(--surface); }
+
+.vx-btn--block { width: 100%; }
+.vx-btn--sm { padding: 7px 13px; font: 500 12.5px/18px var(--sans); }
+.vx-btn--lg { padding: 13px 22px; font: 600 15px/22px var(--sans); }
+.vx-btn__arrow { margin-left: auto; opacity: .75; }
+
+.vx-iconbtn {
+  display: inline-grid;
+  place-items: center;
+  width: 36px; height: 36px;
+  border-radius: var(--r-sm);
+  border: 1px solid var(--line);
+  background: var(--surface);
+  color: var(--ink-soft);
+  cursor: pointer;
+  box-shadow: var(--sh-xs);
+  transition: border-color .15s, color .15s, background .15s;
+}
+.vx-iconbtn:hover:not(:disabled) { color: var(--ink); border-color: var(--line-strong); }
+.vx-iconbtn:disabled { opacity: .45; cursor: not-allowed; }
+.vx-iconbtn:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
+.vx-iconbtn--bare { border-color: transparent; background: transparent; box-shadow: none; }
+.vx-iconbtn--round { border-radius: var(--r-pill); }
+
+/* --- 04. Form elements ---------------------------------------------------- */
+.vx-field { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.vx-field__label {
+  display: flex; align-items: center; justify-content: space-between; gap: var(--s-2);
+  font: var(--t-body-s); color: var(--muted);
+}
+.vx-field__hint { font: var(--t-caption); color: var(--muted); }
+.vx-field__error { display: flex; align-items: center; gap: 6px; font: var(--t-caption); color: var(--down); }
+
+.vx-input {
+  display: flex; align-items: center; gap: var(--s-2);
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--r-sm);
+  padding: 0 12px;
+  height: 42px;
+  box-shadow: var(--sh-xs);
+  transition: border-color .15s, box-shadow .15s;
+}
+.vx-input:focus-within { border-color: var(--focus); box-shadow: 0 0 0 3px var(--teal-wash); }
+.vx-input input, .vx-input select {
+  flex: 1; min-width: 0;
+  border: 0; outline: 0; background: transparent;
+  font: var(--t-body); color: var(--ink);
+}
+.vx-input input::placeholder { color: var(--n-300); }
+.vx-input--error { border-color: var(--down); }
+.vx-input--error:focus-within { box-shadow: 0 0 0 3px var(--down-wash); }
+.vx-input__adorn { display: grid; place-items: center; color: var(--muted); flex: none; }
+.vx-input--mono input { font-family: var(--mono); font-variant-numeric: tabular-nums; }
+.vx-input--lg { height: 48px; }
+.vx-input--lg input { font: 600 18px/24px var(--mono); }
+
+.vx-select { position: relative; }
+.vx-select select { appearance: none; cursor: pointer; padding-right: 18px; }
+.vx-select .vx-input__adorn { pointer-events: none; }
+
+/* --- 07. Badges ----------------------------------------------------------- */
+.vx-badge {
+  display: inline-flex; align-items: center; gap: 5px;
+  border-radius: var(--r-pill);
+  padding: 4px 10px;
+  font: 500 12px/16px var(--sans);
+  white-space: nowrap;
+}
+.vx-badge--teal { background: var(--teal-wash); color: #0d9488; }
+.vx-badge--amber { background: var(--amber-wash); color: #b45309; }
+.vx-badge--green { background: var(--up-wash); color: #15803d; }
+.vx-badge--red { background: var(--down-wash); color: #b91c1c; }
+.vx-badge--violet { background: var(--violet-wash); color: #5b45c7; }
+.vx-badge--slate { background: rgba(100, 116, 139, 0.14); color: var(--n-700); }
+.vx-badge--neutral { background: var(--n-100); color: var(--n-700); }
+.vx-badge--outline { background: var(--surface); border: 1px solid var(--line); color: var(--ink-soft); box-shadow: var(--sh-xs); }
+
+.vx-delta {
+  display: inline-flex; align-items: center; gap: 3px;
+  border-radius: var(--r-pill); padding: 3px 8px;
+  font: 500 12px/16px var(--sans); font-variant-numeric: tabular-nums;
+}
+.vx-delta--up { background: var(--up-wash); color: #15803d; }
+.vx-delta--down { background: var(--down-wash); color: #b91c1c; }
+
+/* --- Card / Panel --------------------------------------------------------- */
+.vx-card {
+  background: var(--surface);
+  border-radius: var(--r-lg);
+  box-shadow: var(--sh-sm);
+  border: 1px solid rgba(16, 24, 40, 0.04);
+  min-width: 0;
+}
+.vx-card--flat { box-shadow: none; border-color: var(--line); }
+.vx-card--sunken { background: var(--surface-sunken); box-shadow: none; border-color: transparent; }
+.vx-card--pad { padding: var(--s-4); }
+
+.vx-panel__head {
+  display: flex; align-items: center; justify-content: space-between; gap: var(--s-3);
+  padding: 14px var(--s-5) 0;
+}
+.vx-panel__title { display: flex; align-items: center; gap: var(--s-2); font: var(--t-h3); }
+.vx-panel__body { padding: var(--s-4) var(--s-5) var(--s-5); }
+.vx-panel__foot {
+  padding: 12px var(--s-5);
+  border-top: 1px solid var(--line);
+  font: var(--t-caption); color: var(--muted); line-height: 1.6;
+}
+
+.vx-sectionlabel {
+  display: flex; align-items: baseline; gap: var(--s-2);
+  font: 500 13px/18px var(--sans); color: var(--ink);
+  margin-bottom: var(--s-3);
+}
+.vx-sectionlabel b { font: 500 13px/18px var(--mono); color: var(--muted); }
+
+/* --- Segmented ------------------------------------------------------------ */
+.vx-seg {
+  display: inline-flex; gap: 2px; padding: 3px;
+  background: var(--surface-sunken);
+  border-radius: var(--r-pill);
+}
+.vx-seg--block { display: flex; }
+.vx-seg--block .vx-seg__btn { flex: 1; }
+.vx-seg__btn {
+  border: 0; background: transparent; cursor: pointer;
+  border-radius: var(--r-pill);
+  padding: 8px 16px;
+  font: 500 13px/18px var(--sans);
+  color: var(--muted);
+  transition: background .18s, color .18s, box-shadow .18s;
+}
+.vx-seg__btn:hover { color: var(--ink); }
+.vx-seg__btn[aria-selected='true'] { background: var(--accent); color: var(--accent-ink); box-shadow: var(--sh-xs); }
+.vx-seg--light .vx-seg__btn[aria-selected='true'] { background: var(--surface); color: var(--ink); }
+.vx-seg__btn[aria-selected='true'].is-up { background: var(--up); color: #fff; }
+.vx-seg__btn[aria-selected='true'].is-down { background: var(--down); color: #fff; }
+.vx-seg__btn:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
+
+/* --- Quick pills ---------------------------------------------------------- */
+.vx-pills { display: flex; flex-wrap: wrap; gap: 6px; }
+.vx-pill {
+  border: 0; cursor: pointer;
+  background: var(--surface-sunken);
+  color: var(--ink-soft);
+  border-radius: var(--r-pill);
+  padding: 5px 12px;
+  font: 500 12px/16px var(--mono); font-variant-numeric: tabular-nums;
+  transition: background .15s, color .15s;
+}
+.vx-pill:hover { background: var(--n-100); color: var(--ink); }
+.vx-pill[aria-pressed='true'] { background: var(--accent); color: var(--accent-ink); }
+.vx-pill:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
+
+/* --- 05. Stat cards ------------------------------------------------------- */
+.vx-stat { padding: var(--s-4); display: flex; flex-direction: column; gap: 10px; }
+.vx-stat__top { display: flex; align-items: center; gap: var(--s-2); }
+.vx-stat__pair { font: 500 13px/18px var(--sans); color: var(--ink-soft); }
+.vx-stat__value { font: 600 26px/32px var(--sans); font-variant-numeric: tabular-nums; letter-spacing: -0.02em; }
+.vx-stat__row { display: flex; align-items: center; justify-content: space-between; gap: var(--s-2); }
+.vx-stat__sub { font: var(--t-body-s); color: var(--muted); font-variant-numeric: tabular-nums; }
+
+.vx-token {
+  display: grid; place-items: center; flex: none;
+  width: 22px; height: 22px; border-radius: var(--r-pill);
+  color: #fff; font: 700 10px/1 var(--sans);
+}
+
+/* --- Sparkline ------------------------------------------------------------ */
+.vx-spark { display: block; width: 100%; overflow: visible; }
+
+/* --- 10. Table ------------------------------------------------------------ */
+.vx-table { width: 100%; border-collapse: collapse; }
+.vx-table th {
+  text-align: left; font: 500 12px/16px var(--sans); color: var(--muted);
+  padding: 10px var(--s-3); border-bottom: 1px solid var(--line); white-space: nowrap;
+}
+.vx-table td {
+  padding: 12px var(--s-3); border-bottom: 1px solid var(--line);
+  font: var(--t-body); font-variant-numeric: tabular-nums;
+}
+.vx-table tbody tr:last-child td { border-bottom: 0; }
+.vx-table tbody tr:hover td { background: var(--surface-sunken); }
+.vx-table .num-col { text-align: right; }
+.vx-table__scroll { overflow-x: auto; }
+
+/* --- 11. Activity list ---------------------------------------------------- */
+.vx-activity { display: flex; flex-direction: column; }
+.vx-activity__row {
+  display: flex; align-items: center; gap: var(--s-3);
+  padding: 12px var(--s-5);
+  border-bottom: 1px solid var(--line);
+}
+.vx-activity__row:last-child { border-bottom: 0; }
+.vx-activity__icon {
+  display: grid; place-items: center; flex: none;
+  width: 32px; height: 32px; border-radius: var(--r-pill);
+  background: var(--surface-sunken); color: var(--ink-soft);
+}
+.vx-activity__main { flex: 1; min-width: 0; }
+.vx-activity__title { font: 500 13px/18px var(--sans); }
+.vx-activity__meta { font: var(--t-caption); color: var(--muted); }
+
+/* --- 12. Alerts ----------------------------------------------------------- */
+.vx-alert {
+  display: flex; align-items: flex-start; gap: 10px;
+  border-radius: var(--r-md);
+  padding: 12px 14px;
+  font: var(--t-body-s);
+}
+.vx-alert__icon { flex: none; margin-top: 1px; }
+.vx-alert__body { flex: 1; min-width: 0; line-height: 1.55; }
+.vx-alert__title { font: 600 13px/18px var(--sans); }
+.vx-alert--success { background: var(--up-wash); color: #15803d; }
+.vx-alert--warning { background: var(--amber-wash); color: #b45309; }
+.vx-alert--error { background: var(--down-wash); color: #b91c1c; }
+.vx-alert--info { background: var(--teal-wash); color: #0f766e; }
+.vx-alert--neutral { background: var(--surface-sunken); color: var(--ink-soft); }
+
+/* --- 13. Modal ------------------------------------------------------------ */
+.vx-modal__scrim {
+  position: fixed; inset: 0; z-index: 60;
+  background: rgba(15, 23, 42, 0.32);
+  backdrop-filter: blur(3px);
+  display: grid; place-items: center;
+  padding: var(--s-5);
+  animation: vx-fade .16s ease;
+}
+.vx-modal {
+  width: min(420px, 100%);
+  background: var(--surface);
+  border-radius: var(--r-xl);
+  box-shadow: var(--sh-xl);
+  animation: vx-rise .18s cubic-bezier(.2,.8,.2,1);
+}
+.vx-modal__head { display: flex; align-items: center; justify-content: space-between; gap: var(--s-3); padding: var(--s-5) var(--s-5) 0; }
+.vx-modal__title { font: var(--t-h3); font-weight: 600; }
+.vx-modal__body { padding: var(--s-4) var(--s-5); }
+.vx-modal__foot { display: flex; gap: var(--s-2); padding: 0 var(--s-5) var(--s-5); }
+.vx-modal__foot .vx-btn { flex: 1; }
+@keyframes vx-fade { from { opacity: 0 } }
+@keyframes vx-rise { from { opacity: 0; transform: translateY(8px) scale(.985) } }
+
+/* --- 14. Tooltip ---------------------------------------------------------- */
+.vx-tip { position: relative; display: inline-flex; }
+.vx-tip__bubble {
+  position: absolute; bottom: calc(100% + 8px); left: 50%;
+  translate: -50% 0;
+  z-index: 50;
+  width: max-content; max-width: 240px;
+  background: var(--n-900); color: #fff;
+  border-radius: var(--r-sm);
+  padding: 10px 12px;
+  box-shadow: var(--sh-lg);
+  opacity: 0; pointer-events: none;
+  transition: opacity .14s, translate .14s;
+  translate: -50% 4px;
+}
+.vx-tip:hover .vx-tip__bubble, .vx-tip:focus-within .vx-tip__bubble { opacity: 1; translate: -50% 0; }
+.vx-tip__title { font: 600 12px/16px var(--sans); margin-bottom: 2px; }
+.vx-tip__text { font: var(--t-caption); color: rgba(255,255,255,.75); }
+
+/* --- 15. Progress & loaders ---------------------------------------------- */
+.vx-progress {
+  display: flex; align-items: center; gap: 10px;
+}
+.vx-progress__track { flex: 1; height: 8px; border-radius: var(--r-pill); background: var(--n-100); overflow: hidden; }
+.vx-progress__fill { height: 100%; border-radius: var(--r-pill); background: var(--accent); transition: width .25s ease; }
+.vx-progress__val { font: 500 12px/16px var(--mono); color: var(--muted); font-variant-numeric: tabular-nums; }
+
+.vx-spinner { display: inline-block; animation: vx-spin 900ms linear infinite; color: var(--muted); }
+@keyframes vx-spin { to { transform: rotate(360deg) } }
+
+.vx-skeleton {
+  border-radius: var(--r-xs);
+  background: linear-gradient(90deg, var(--n-100) 25%, #e9edf3 37%, var(--n-100) 63%);
+  background-size: 400% 100%;
+  animation: vx-shimmer 1.3s ease infinite;
+}
+@keyframes vx-shimmer { from { background-position: 100% 0 } to { background-position: 0 0 } }
+
+/* --- Key/value telemetry grid -------------------------------------------- */
+.vx-kv { display: flex; flex-direction: column; gap: 2px; }
+.vx-kv__row { display: flex; align-items: center; justify-content: space-between; gap: var(--s-3); padding: 7px 0; }
+.vx-kv__k { font: var(--t-body-s); color: var(--muted); }
+.vx-kv__v { font: 500 13px/18px var(--mono); font-variant-numeric: tabular-nums; }
+
+.vx-tiles { display: grid; grid-template-columns: 1fr 1fr; gap: var(--s-2); }
+.vx-tile { background: var(--surface-sunken); border-radius: var(--r-md); padding: 12px 14px; }
+.vx-tile__k { font: var(--t-caption); color: var(--muted); }
+.vx-tile__v { font: 600 18px/26px var(--mono); font-variant-numeric: tabular-nums; margin-top: 2px; }
+
+/* --- Shell / nav ---------------------------------------------------------- */
+.vx-shell { display: flex; flex-direction: column; min-height: 100%; }
+
+/* --- Top nav — onverre.com -----------------------------------------------
+   Logo left, plain-text links, one square outlined action. Sits on a dashed
+   rule, the same hairline the page grid is drawn with.                       */
+.vx-topnav {
+  position: sticky; top: 0; z-index: 30;
+  display: flex; align-items: center; gap: var(--s-5);
+  padding: 0 var(--s-6);
+  height: 62px;
+  background: rgba(251, 251, 250, 0.82);
+  backdrop-filter: blur(10px);
+  border-bottom: 1px dashed var(--grid-line);
+}
+
+.vx-wordmark {
+  display: flex; align-items: center; gap: 7px;
+  border: 0; background: transparent; padding: 0; cursor: pointer;
+  font: 700 19px/24px var(--sans);
+  letter-spacing: -0.03em;
+  color: var(--ink);
+  flex: none;
+}
+.vx-wordmark svg { flex: none; }
+
+.vx-topnav__links { display: none; align-items: center; gap: 2px; }
+@media (min-width: 880px) { .vx-topnav__links { display: flex; } }
+.vx-topnav__link {
+  border: 0; background: transparent; cursor: pointer;
+  padding: 7px 12px;
+  border-radius: var(--r-xs);
+  font: 500 14px/20px var(--sans);
+  letter-spacing: -0.01em;
+  color: var(--muted);
+  transition: color .15s, background .15s;
+}
+.vx-topnav__link:hover { color: var(--ink); background: rgba(15, 23, 42, 0.04); }
+.vx-topnav__link[aria-current='page'] { color: var(--ink); font-weight: 600; }
+.vx-topnav__link:focus-visible { outline: 2px solid var(--focus); outline-offset: 2px; }
+
+.vx-topnav__right { display: flex; align-items: center; gap: var(--s-2); margin-left: auto; }
+
+/* The mobile picker takes over below the links breakpoint. */
+.vx-topnav__picker { margin-left: auto; }
+@media (min-width: 880px) { .vx-topnav__picker { display: none; } }
+
+.vx-topbar {
+  display: flex; align-items: center; justify-content: space-between; gap: var(--s-3);
+  flex-wrap: wrap;
+}
+.vx-topbar__nav { display: flex; gap: 2px; padding: 4px; background: rgba(255,255,255,.6); border-radius: var(--r-pill); backdrop-filter: blur(6px); }
+.vx-topbar__right { display: flex; align-items: center; gap: var(--s-2); }
+
+.vx-main {
+  padding: var(--s-6);
+  display: flex; flex-direction: column; gap: var(--s-4);
+  min-width: 0;
+  max-width: 1560px; width: 100%; margin: 0 auto;
+}
+
+.vx-grid { display: grid; gap: var(--s-4); min-width: 0; }
+.vx-grid--desk { grid-template-columns: 1fr; }
+@media (min-width: 1180px) { .vx-grid--desk { grid-template-columns: minmax(0, 1fr) 360px; } }
+.vx-grid--2 { grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); }
+.vx-grid--stats { grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); }
+
+.vx-col { display: flex; flex-direction: column; gap: var(--s-4); min-width: 0; }
+.vx-row { display: flex; align-items: center; gap: var(--s-2); }
+.vx-row--between { display: flex; align-items: center; justify-content: space-between; gap: var(--s-3); }
+.vx-wrap { flex-wrap: wrap; }
+.vx-spacer { flex: 1; }
+
+.vx-price { font: 700 40px/46px var(--sans); letter-spacing: -0.025em; font-variant-numeric: tabular-nums; }
+.vx-muted { color: var(--muted); }
+.vx-up { color: var(--up); }
+.vx-down { color: var(--down); }
+
+.vx-empty { padding: 36px var(--s-5); text-align: center; color: var(--muted); font: var(--t-body-s); }
+
+.vx-toast {
+  position: fixed; left: 50%; bottom: 24px; translate: -50% 0; z-index: 70;
+  display: flex; align-items: center; gap: var(--s-2);
+  background: var(--n-900); color: #fff;
+  border-radius: var(--r-pill);
+  padding: 10px 18px;
+  font: 500 13px/18px var(--sans);
+  box-shadow: var(--sh-lg);
+  animation: vx-rise .2s cubic-bezier(.2,.8,.2,1);
+}
+
+/* --- 08. Chart frame ------------------------------------------------------ */
+.vx-chart { position: relative; }
+.vx-chart__canvas { width: 100%; height: 360px; }
+.vx-chart__flag {
+  position: absolute; top: 10px; left: 10px;
+  pointer-events: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  * { animation-duration: .001ms !important; transition-duration: .001ms !important; }
+}
+
+/* ============================================================================
+   Kuru-derived trading structures, rendered in the Voltrex language.
+   From kuru.io/trade: the market strip, the order form with its
+   available-balance slider, the workspace tab bar, the depth ladder,
+   the trending-markets rail and the empty state.
+   ========================================================================= */
+
+/* --- Market strip --------------------------------------------------------- */
+.vx-strip {
+  display: flex; align-items: stretch; gap: 0;
+  flex-wrap: wrap;
+  padding: 10px var(--s-4);
+}
+.vx-strip__pair {
+  display: flex; align-items: center; gap: 10px;
+  border: 0; background: transparent; cursor: pointer;
+  border-radius: var(--r-sm);
+  padding: 6px 10px; margin-right: var(--s-3);
+  transition: background .15s;
+}
+.vx-strip__pair:hover { background: var(--surface-sunken); }
+.vx-strip__pairname { font: 600 15px/20px var(--sans); letter-spacing: -0.01em; }
+.vx-strip__cell {
+  display: flex; flex-direction: column; justify-content: center; gap: 1px;
+  padding: 4px var(--s-4);
+  border-left: 1px solid var(--line);
+  min-width: 108px;
+}
+.vx-strip__cell:first-of-type { border-left: 0; }
+.vx-strip__k { font: 400 11px/15px var(--sans); color: var(--muted); letter-spacing: .02em; }
+.vx-strip__v { font: 500 14px/20px var(--mono); font-variant-numeric: tabular-nums; }
+
+/* --- Underline tabs (workspace) ------------------------------------------ */
+.vx-tabs {
+  display: flex; gap: var(--s-1); align-items: center;
+  border-bottom: 1px solid var(--line);
+  padding: 0 var(--s-4);
+  overflow-x: auto;
+}
+.vx-tabs__btn {
+  border: 0; background: transparent; cursor: pointer;
+  padding: 11px 10px 10px;
+  font: 500 13px/18px var(--sans);
+  color: var(--muted);
+  border-bottom: 2px solid transparent;
+  margin-bottom: -1px;
+  white-space: nowrap;
+  transition: color .15s, border-color .15s;
+}
+.vx-tabs__btn:hover { color: var(--ink); }
+.vx-tabs__btn[aria-selected='true'] { color: var(--ink); border-bottom-color: var(--accent); }
+.vx-tabs__btn:focus-visible { outline: 2px solid var(--focus); outline-offset: -2px; }
+.vx-tabs__count {
+  margin-left: 5px; border-radius: var(--r-pill);
+  background: var(--n-100); color: var(--muted);
+  padding: 1px 6px; font: 500 11px/15px var(--mono);
+}
+
+/* --- Depth ladder --------------------------------------------------------- */
+.vx-ladder { display: flex; flex-direction: column; font-variant-numeric: tabular-nums; }
+.vx-ladder__head {
+  display: grid; gap: var(--s-2);
+  padding: 8px var(--s-4);
+  font: 400 11px/15px var(--sans); color: var(--muted);
+  border-bottom: 1px solid var(--line);
+}
+.vx-ladder__row {
+  position: relative;
+  display: grid; gap: var(--s-2); align-items: center; white-space: nowrap;
+  padding: 5px var(--s-4);
+  font: 500 12.5px/18px var(--mono);
+  border: 0; background: transparent; width: 100%; text-align: left;
+  cursor: pointer;
+}
+.vx-ladder__row:hover { background: var(--surface-sunken); }
+.vx-ladder__row:focus-visible { outline: 2px solid var(--focus); outline-offset: -2px; }
+.vx-ladder__row[aria-current='true'] { background: var(--teal-wash); }
+.vx-ladder__depth {
+  position: absolute; top: 1px; bottom: 1px; right: 0;
+  border-radius: var(--r-xs) 0 0 var(--r-xs);
+  pointer-events: none;
+  opacity: .16;
+}
+.vx-ladder__depth.is-up { background: var(--up); }
+.vx-ladder__depth.is-down { background: var(--down); }
+.vx-ladder__row > span:not(.vx-ladder__depth) { position: relative; }
+.vx-ladder__mid {
+  display: flex; align-items: center; justify-content: space-between; gap: var(--s-2);
+  padding: 9px var(--s-4);
+  background: var(--surface-sunken);
+  border-block: 1px solid var(--line);
+  font: 600 14px/20px var(--mono); font-variant-numeric: tabular-nums;
+}
+.vx-ladder__midk { font: 400 11px/15px var(--sans); color: var(--muted); }
+.num-r { text-align: right; }
+
+/* --- Available-balance slider (percent detents) --------------------------- */
+.vx-balance { display: flex; flex-direction: column; gap: 8px; }
+.vx-balance__head { display: flex; align-items: center; justify-content: space-between; gap: var(--s-2); }
+.vx-balance__k { font: var(--t-body-s); color: var(--muted); }
+.vx-balance__v { font: 500 12.5px/18px var(--mono); font-variant-numeric: tabular-nums; }
+
+/* --- Trending / watchlist rail -------------------------------------------- */
+.vx-rail { display: flex; flex-direction: column; }
+.vx-rail__row {
+  display: grid; grid-template-columns: auto 1fr auto; gap: 10px; align-items: center;
+  border: 0; background: transparent; width: 100%; text-align: left;
+  padding: 9px var(--s-4);
+  cursor: pointer;
+  border-bottom: 1px solid var(--line);
+}
+.vx-rail__row:last-child { border-bottom: 0; }
+.vx-rail__row:hover { background: var(--surface-sunken); }
+.vx-rail__name { font: 500 13px/18px var(--sans); }
+.vx-rail__sub { font: 400 11px/15px var(--mono); color: var(--muted); font-variant-numeric: tabular-nums; }
+
+/* --- Empty state ---------------------------------------------------------- */
+.vx-emptystate {
+  display: flex; flex-direction: column; align-items: center; gap: 6px;
+  padding: 40px var(--s-5); text-align: center;
+}
+.vx-emptystate__icon {
+  display: grid; place-items: center;
+  width: 42px; height: 42px; border-radius: var(--r-pill);
+  background: var(--surface-sunken); color: var(--muted);
+  margin-bottom: 2px;
+}
+.vx-emptystate__title { font: 600 14px/20px var(--sans); }
+.vx-emptystate__desc { font: var(--t-body-s); color: var(--muted); max-width: 32ch; }
+
+
+/* --- Hero band — onverre's landing rhythm ---------------------------------
+   Mono eyebrow, oversized tight headline, grey standfirst, no card around it. */
+.vx-hero {
+  display: flex; flex-direction: column; gap: var(--s-3);
+  padding: var(--s-8) 0 var(--s-6);
+  max-width: 920px;
+}
+.vx-hero__eyebrow {
+  font: 500 11px/16px var(--mono);
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+.vx-hero__title {
+  margin: 0;
+  font: 600 clamp(28px, 3.4vw, 44px) / 1.06 var(--sans);
+  letter-spacing: -0.035em;
+  color: var(--ink);
+}
+.vx-hero__title em { font-style: normal; color: var(--muted); }
+.vx-hero__lede {
+  margin: 0;
+  font: 400 16px/26px var(--sans);
+  color: var(--ink-soft);
+  max-width: 54ch;
+}
+.vx-hero__actions { display: flex; flex-wrap: wrap; gap: var(--s-2); margin-top: var(--s-2); }
+
+/* ============================================================================
+   Landing surfaces. onverre's rhythm — dashed rules, mono eyebrows, oversized
+   figures, no card around the argument.
+   ========================================================================= */
+
+.lp { display: flex; flex-direction: column; }
+
+.lp-sec { padding: var(--s-8) 0; border-top: 1px dashed var(--grid-line); }
+.lp-sec:first-child { border-top: 0; }
+
+.lp-eyebrow {
+  font: 500 11px/16px var(--mono);
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--muted);
+  margin-bottom: var(--s-4);
+}
+
+.lp-h2 {
+  margin: 0 0 var(--s-3);
+  font: 600 clamp(22px, 2.4vw, 31px) / 1.14 var(--sans);
+  letter-spacing: -0.028em;
+  max-width: 24ch;
+}
+.lp-h2 em { font-style: normal; color: var(--muted); }
+
+.lp-lede { margin: 0 0 var(--s-5); font: 400 15px/25px var(--sans); color: var(--ink-soft); max-width: 62ch; }
+
+/* -- the three figures ----------------------------------------------------- */
+.lp-figs { display: grid; gap: 1px; background: var(--grid-line); border: 1px solid var(--grid-line); border-radius: var(--r-md); overflow: hidden; }
+@media (min-width: 720px) { .lp-figs { grid-template-columns: repeat(3, 1fr); } }
+.lp-fig { background: var(--surface); padding: var(--s-5); }
+.lp-fig__n {
+  font: 600 clamp(32px, 3.6vw, 44px) / 1 var(--sans);
+  letter-spacing: -0.04em;
+  font-variant-numeric: tabular-nums;
+}
+.lp-fig__n small { font-size: 0.42em; font-weight: 500; color: var(--muted); margin-left: 6px; letter-spacing: 0; }
+.lp-fig__k { margin-top: 8px; font: var(--t-body-s); color: var(--muted); max-width: 30ch; }
+
+/* -- the closed-window chart ---------------------------------------------- */
+.lp-chart { position: relative; margin-top: var(--s-5); border: 1px solid var(--line); border-radius: var(--r-md); background: var(--surface); padding: var(--s-4); }
+.lp-chart svg { display: block; width: 100%; height: 190px; }
+.lp-chart__legend { display: flex; flex-wrap: wrap; gap: var(--s-4); margin-top: var(--s-3); font: var(--t-caption); color: var(--muted); }
+.lp-chart__key { display: inline-flex; align-items: center; gap: 6px; }
+.lp-chart__sw { width: 12px; height: 12px; border-radius: 3px; flex: none; }
+
+/* -- comparison + product rows -------------------------------------------- */
+.lp-rows { border: 1px solid var(--line); border-radius: var(--r-md); overflow: hidden; background: var(--surface); }
+.lp-row {
+  display: grid; gap: var(--s-3); align-items: center;
+  grid-template-columns: 1fr;
+  padding: 14px var(--s-5);
+  border-top: 1px solid var(--line);
+}
+.lp-row:first-child { border-top: 0; }
+@media (min-width: 820px) {
+  .lp-row { grid-template-columns: 1.1fr 1.5fr 1fr auto; }
+}
+.lp-row--head {
+  background: var(--surface-sunken);
+  font: 500 11px/16px var(--mono);
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--muted);
+  padding: 10px var(--s-5);
+}
+.lp-row--ours { background: var(--up-wash); }
+.lp-row__name { font: 600 14px/20px var(--sans); display: flex; align-items: center; gap: 8px; }
+.lp-row__sub { font: var(--t-body-s); color: var(--ink-soft); }
+.lp-row__worst { font: 500 13px/18px var(--mono); font-variant-numeric: tabular-nums; }
+
+/* -- steps ---------------------------------------------------------------- */
+.lp-steps { display: grid; gap: var(--s-4); }
+@media (min-width: 820px) { .lp-steps { grid-template-columns: repeat(3, 1fr); } }
+.lp-step { border-left: 2px solid var(--ink); padding-left: var(--s-4); }
+.lp-step__n { font: 500 11px/16px var(--mono); color: var(--muted); letter-spacing: 0.12em; }
+.lp-step__t { font: 600 16px/22px var(--sans); margin: 4px 0 6px; letter-spacing: -0.015em; }
+.lp-step__b { font: var(--t-body-s); color: var(--ink-soft); line-height: 1.6; }
+.lp-step code { font: 500 12px/18px var(--mono); background: var(--surface-sunken); padding: 1px 5px; border-radius: 4px; }
+
+/* -- closing CTA ---------------------------------------------------------- */
+.lp-cta {
+  display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between;
+  gap: var(--s-4);
+  border: 1px solid var(--ink);
+  border-radius: var(--r-md);
+  padding: var(--s-6);
+}
+.lp-cta__t { font: 600 clamp(20px, 2vw, 26px) / 1.2 var(--sans); letter-spacing: -0.028em; max-width: 26ch; }
+
+/* ============================================================================
+   Order ticket — the stacked white cards from the Voltrex reference shot.
+   One card per decision: a label, a big value, and a row of quick picks.
+   At most one continuous control (the wake slider) in the whole panel.
+   ========================================================================= */
+
+.tk { display: flex; flex-direction: column; gap: 10px; }
+
+.tk-card {
+  background: var(--surface);
+  border: 1px solid rgba(16, 24, 40, 0.05);
+  border-radius: var(--r-lg);
+  box-shadow: var(--sh-xs);
+  padding: 13px 15px 14px;
+}
+
+.tk-card__top {
+  display: flex; align-items: center; justify-content: space-between; gap: var(--s-2);
+  min-height: 20px;
+}
+.tk-card__k { font: 400 13px/18px var(--sans); color: var(--muted); }
+.tk-card__unit {
+  display: inline-flex; align-items: center; gap: 3px;
+  font: 500 12.5px/18px var(--sans); color: var(--ink-soft);
+}
+.tk-card__v {
+  font: 600 29px/36px var(--sans);
+  letter-spacing: -0.032em;
+  font-variant-numeric: tabular-nums;
+  margin: 2px 0 10px;
+}
+.tk-card__v small { font-size: 0.52em; font-weight: 500; color: var(--muted); margin-left: 4px; letter-spacing: 0; }
+.tk-card__v.is-up { color: var(--up); }
+.tk-card__v.is-down { color: var(--down); }
+
+.tk-card--slider .tk-card__v { margin-bottom: 4px; }
+
+.tk-place { margin-top: 2px; }
+
+/* summary rows under the button */
+.tk-sum { display: flex; flex-direction: column; padding: var(--s-2) 2px 0; }
+.tk-sum__r { display: flex; align-items: center; justify-content: space-between; gap: var(--s-3); padding: 6px 0; }
+.tk-sum__k { font: 400 13px/18px var(--sans); color: var(--muted); }
+.tk-sum__v { font: 500 13px/18px var(--sans); font-variant-numeric: tabular-nums; }
+
+/* ---- chart header, matching the reference shot ------------------------- */
+.ck-head { display: flex; align-items: flex-start; justify-content: space-between; gap: var(--s-4); padding: var(--s-5) var(--s-5) 0; flex-wrap: wrap; }
+.ck-pair { display: flex; align-items: center; gap: 9px; font: 500 15px/20px var(--sans); color: var(--ink-soft); }
+.ck-price { display: flex; align-items: center; gap: 10px; margin-top: 4px; }
+.ck-price b { font: 700 38px/44px var(--sans); letter-spacing: -0.035em; font-variant-numeric: tabular-nums; }
+.ck-tools { display: flex; align-items: center; gap: var(--s-2); }
+.ck-icons { display: flex; align-items: center; gap: 2px; }
