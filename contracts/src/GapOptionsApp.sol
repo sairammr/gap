@@ -4,6 +4,7 @@ pragma solidity 0.8.30;
 import {AquaApp} from "@1inch/aqua/contracts/AquaApp.sol";
 import {IAqua} from "@1inch/aqua/contracts/interfaces/IAqua.sol";
 import {ERC1155} from "@openzeppelin/contracts/token/ERC1155/ERC1155.sol";
+import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {FixedPointMathLib as F} from "solady/utils/FixedPointMathLib.sol";
 import {IStateView} from "./interfaces/IStateView.sol";
 import {IGapOptionCallback} from "./interfaces/IGapOptionCallback.sol";
@@ -55,6 +56,13 @@ contract GapOptionsApp is AquaApp, ERC1155 {
     /// @notice Monotonic nonce mixed into positionId derivation.
     uint256 public optionNonce;
 
+    /// @notice Number of spot reads averaged at settlement. In a single tx no time
+    ///         passes, so every `UniV4Spot.spotWad` read is identical and the average
+    ///         equals one read; this is a deliberate hook for a future multi-block
+    ///         observation window. Averaging across a real settle window (TWAP-like,
+    ///         manipulation resistance) is the UI/keeper's job, not this in-tx loop.
+    uint256 internal constant SAMPLES = 3;
+
     /// @notice Thrown when a strategy is not bound to this app contract.
     error NotThisApp();
     /// @notice Thrown when the quoted premium exceeds the taker's max.
@@ -63,6 +71,14 @@ contract GapOptionsApp is AquaApp, ERC1155 {
     error InsufficientMakerCollateral();
     /// @notice Thrown when buying an already-expired option.
     error OptionExpired();
+    /// @notice Thrown when settling before the option's expiry.
+    error NotExpired();
+    /// @notice Thrown when settling an already-settled position.
+    error AlreadySettled();
+    /// @notice Thrown when the supplied strategy does not hash to the position's record.
+    error StrategyMismatch();
+    /// @notice Safety invariant: payout must never exceed the held backing. Should never trip.
+    error PayoutExceedsBacking();
 
     /// @notice Emitted when a taker buys an option and the position is minted.
     event OptionBought(
@@ -74,6 +90,15 @@ contract GapOptionsApp is AquaApp, ERC1155 {
         uint64 expiry,
         uint256 size,
         uint256 premium
+    );
+
+    /// @notice Emitted when a position is settled: holder paid `payout`, maker returned `remainder`.
+    event OptionSettled(
+        uint256 indexed positionId,
+        address indexed holder,
+        uint256 spotWad,
+        uint256 payout,
+        uint256 remainder
     );
 
     constructor(IAqua aqua, IStateView stateView) AquaApp(aqua) ERC1155("") {
@@ -228,5 +253,73 @@ contract GapOptionsApp is AquaApp, ERC1155 {
     /// @dev Reverts unless the strategy is bound to this app.
     function _validateStrategy(Strategy calldata s) internal view {
         if (s.app != address(this)) revert NotThisApp();
+    }
+
+    /// @notice Permissionlessly settle an expired position in USDC cash.
+    /// @dev Signature widened from the brief's `settle(uint256)`:
+    ///      - `Strategy calldata s`: `Position` stores only `strategyHash`, not the pool
+    ///        id / decimals / orientation that `_sampleSpot` needs. The maker-supplied
+    ///        strategy carries those (as `buyOption` does); we re-derive its hash and
+    ///        require it to match, keeping `Position` lean.
+    ///      - `address holder`: the ERC-1155 is fungible per positionId and has no
+    ///        enumeration, so the caller names the holder to pay. The whole position is
+    ///        settled for that holder.
+    ///      Custody follows the committed model (Rulings 2+3+4): the app already pulled
+    ///      and HOLDS `capBacking` USDC at `buyOption`. Settlement pays the holder from
+    ///      that held balance and returns the remainder to the maker — there is NO second
+    ///      AQUA.pull. CEI: expiry/settled/hash checks, then effects (settled + burn),
+    ///      then the two transfers.
+    function settle(Strategy calldata s, uint256 positionId, address holder) external {
+        Position storage p = positions[positionId];
+        require(block.timestamp >= p.expiry, NotExpired());
+        require(!p.settled, AlreadySettled());
+        require(hashStrategy(s) == p.strategyHash, StrategyMismatch());
+
+        uint256 spotWad = _sampleSpot(s);
+
+        // Capped intrinsic payoff (realized spot, NOT Black-Scholes).
+        uint256 intrinsicWad;
+        if (p.kind == 0) {
+            // CALL
+            intrinsicWad = spotWad > p.strike ? spotWad - p.strike : 0;
+        } else {
+            // PUT
+            intrinsicWad = p.strike > spotWad ? p.strike - spotWad : 0;
+        }
+        uint256 cappedWad = intrinsicWad > p.cap ? p.cap : intrinsicWad;
+        uint256 payoutWadSized = F.mulWad(cappedWad, p.size);
+        uint256 payout = F.mulDiv(payoutWadSized, 10 ** s.quoteDecimals, 1e18);
+
+        // Safety invariant: payout = min(..,cap)*size <= cap*size == capBacking. Never trips.
+        require(payout <= p.capBacking, PayoutExceedsBacking());
+        uint256 remainder = p.capBacking - payout;
+
+        // Effects before interactions.
+        p.settled = true;
+        _burn(holder, positionId, p.size);
+
+        // Interactions: pay holder from held backing, return the remainder to the maker.
+        if (payout > 0) {
+            IERC20(p.quote).transfer(holder, payout);
+        }
+        if (remainder > 0) {
+            IERC20(p.quote).transfer(p.maker, remainder);
+        }
+
+        emit OptionSettled(positionId, holder, spotWad, payout, remainder);
+    }
+
+    /// @notice Spot sampled for settlement, averaged over `SAMPLES` reads.
+    /// @dev In a single tx no time passes, so every read of `UniV4Spot.spotWad` is
+    ///      identical and the average equals one read. The loop is a deliberate hook
+    ///      for a future multi-block window; today it is honestly a single read.
+    function _sampleSpot(Strategy memory s) internal view returns (uint256 spotWad) {
+        uint256 acc;
+        for (uint256 i = 0; i < SAMPLES; ++i) {
+            acc += UniV4Spot.spotWad(
+                STATE_VIEW, s.poolId, s.underlyingDecimals, s.quoteDecimals, s.underlyingIsCurrency0
+            );
+        }
+        spotWad = acc / SAMPLES;
     }
 }
