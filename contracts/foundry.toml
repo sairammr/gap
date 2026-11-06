@@ -11,7 +11,7 @@ optimizer_runs = 1000
 via_ir = false
 fs_permissions = [{ access = "read-write", path = "./deployments" }]
 remappings = [
-  "forge-std/=lib/forge-std/src/",
+  "forge-std/=node_modules/@uniswap/v4-core/lib/forge-std/src/",
   "@1inch/aqua/=node_modules/@1inch/aqua/",
   "@1inch/solidity-utils/=node_modules/@1inch/solidity-utils/",
   "@openzeppelin/contracts/=node_modules/@openzeppelin/contracts/",
