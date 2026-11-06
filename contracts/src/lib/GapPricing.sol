@@ -4,13 +4,8 @@ pragma solidity 0.8.30;
 import { FixedPointMathLib as F } from "solady/utils/FixedPointMathLib.sol";
 
 /// @title GapPricing
-/// @notice Black-Scholes (r = 0) premia for *capped* overnight-gap options.
-/// @dev All prices and the premium are WAD (1e18) quote-per-underlying. Sizes are applied by the caller.
-///
-/// A capped call struck at `K` with cap `C` is the vertical spread `call(K) - call(K + C)`:
-/// its payoff is `min(max(0, S - K), C)`, which is bounded, so the writer can fully collateralise it
-/// with exactly `C` per unit. The same decomposition gives the capped put as `put(K) - put(K - C)`.
-/// Everything therefore reduces to one vanilla Black-Scholes call, priced four times at most.
+/// @notice Black-Scholes (r = 0) pricing for plain vanilla options.
+/// @dev All prices are WAD (1e18) quote-per-underlying. Sizes are applied by the caller.
 ///
 /// Rates are intentionally omitted: these options live for hours, so `r * T` is noise next to the
 /// overnight gap itself.
@@ -20,39 +15,6 @@ library GapPricing {
 
     uint8 internal constant CALL = 0;
     uint8 internal constant PUT = 1;
-
-    error UnknownOptionKind(uint8 kind);
-
-    /// @notice Premium of a capped gap option, WAD quote per 1 WAD of underlying.
-    /// @param kind `CALL` (0) or `PUT` (1)
-    /// @param spot Spot price, WAD quote per underlying
-    /// @param strike Strike price, WAD
-    /// @param cap Maximum payoff per unit, WAD (also the collateral locked per unit)
-    /// @param secondsToExpiry Time to expiry in seconds
-    /// @param volWad Annualised implied volatility, WAD (1e18 == 100%)
-    function premium(
-        uint8 kind,
-        uint256 spot,
-        uint256 strike,
-        uint256 cap,
-        uint256 secondsToExpiry,
-        uint256 volWad
-    ) internal pure returns (uint256) {
-        if (kind == CALL) {
-            // call(K) - call(K + cap)
-            uint256 near = call(spot, strike, secondsToExpiry, volWad);
-            uint256 far = call(spot, strike + cap, secondsToExpiry, volWad);
-            return near > far ? near - far : 0;
-        }
-        if (kind == PUT) {
-            // put(K) - put(K - cap), floored at a zero strike
-            uint256 lower = strike > cap ? strike - cap : 0;
-            uint256 near = put(spot, strike, secondsToExpiry, volWad);
-            uint256 far = put(spot, lower, secondsToExpiry, volWad);
-            return near > far ? near - far : 0;
-        }
-        revert UnknownOptionKind(kind);
-    }
 
     /// @notice Vanilla Black-Scholes call, r = 0. WAD in, WAD out.
     function call(uint256 spot, uint256 strike, uint256 secondsToExpiry, uint256 volWad)

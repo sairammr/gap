@@ -9,7 +9,7 @@ import { IStateView } from "../interfaces/IStateView.sol";
 /// @notice Reads a Uniswap v4 pool's spot price and normalises it to WAD quote-per-underlying.
 /// @dev v4 core exposes no TWAP accumulator (that is a hook's job), so this is the instantaneous
 ///      `sqrtPriceX96` from slot0. Callers needing manipulation resistance must layer their own
-///      observation window on top — `GapOptionsApp` does exactly that for settlement.
+///      observation window on top.
 library UniV4Spot {
     error PoolNotInitialized(bytes32 poolId);
 

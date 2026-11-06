@@ -3,7 +3,6 @@ pragma solidity 0.8.30;
 
 import {Script, console2} from "forge-std/Script.sol";
 
-import {IAqua} from "@1inch/aqua/contracts/interfaces/IAqua.sol";
 import {Aqua} from "@1inch/aqua/contracts/Aqua.sol";
 
 import {IPoolManager} from "@uniswap/v4-core/src/interfaces/IPoolManager.sol";
@@ -16,8 +15,6 @@ import {LiquidityAmounts} from "@uniswap/v4-periphery/src/libraries/LiquidityAmo
 import {PoolSetup} from "./lib/PoolSetup.sol";
 import {UniV4Spot} from "../src/lib/UniV4Spot.sol";
 import {IStateView} from "../src/interfaces/IStateView.sol";
-import {GapOptionsApp} from "../src/GapOptionsApp.sol";
-import {GapTaker} from "../src/GapTaker.sol";
 import {MockERC20} from "../src/mocks/MockERC20.sol";
 
 /// @notice Minimal Permit2 surface needed to let the PositionManager pull tokens.
@@ -26,9 +23,9 @@ interface IPermit2 {
 }
 
 /// @title DeployGap
-/// @notice Deploys the Gap options stack on Base Sepolia: mock USDC + mock NVDAx,
-///         a fresh Aqua, the `GapOptionsApp`, and a seeded Uniswap v4 NVDAx/USDC pool
-///         priced at ~100 USDC/NVDAx. Writes `deployments/base-sepolia.json`.
+/// @notice Deploys the Base Sepolia infra: mock USDC + mock NVDAx, a fresh Aqua, and a
+///         seeded Uniswap v4 NVDAx/USDC pool priced at ~100 USDC/NVDAx.
+///         Writes `deployments/base-sepolia.json`.
 /// @dev Ruling 5: collateral + settlement token is the MOCK USDC we deploy here, not
 ///      NVDAx. NVDAx is pricing-only (its v4 spot feeds Black-Scholes). We deploy a
 ///      mock USDC because Base Sepolia's real Circle USDC cannot be minted by the
@@ -63,7 +60,7 @@ contract DeployGap is Script {
     // Budgets the deployer KEEPS after seeding. Load-bearing: Aqua's `ship` only records
     // an accounting entry, the actual ERC20 transfer happens later at `pull` time out of
     // the maker's wallet. If the mint equals the pool budget, the seed consumes the lot and
-    // the first `buyOption` reverts ERC20InsufficientBalance against a maker who looks, on
+    // the first pull reverts ERC20InsufficientBalance against a maker who looks, on
     // Aqua's books, fully collateralised. Mint pool budget + wallet budget, not just one.
     uint256 internal constant NVDAX_WALLET_BUDGET = 100_000e18;
     uint256 internal constant USDC_WALLET_BUDGET = 10_000_000e6;
@@ -73,8 +70,6 @@ contract DeployGap is Script {
         Aqua aqua;
         MockERC20 nvdax;
         MockERC20 usdc;
-        GapOptionsApp app;
-        GapTaker taker;
         address deployer;
         bytes32 poolId;
         bool underlyingIsCurrency0;
@@ -102,19 +97,15 @@ contract DeployGap is Script {
         _writeJson(d);
     }
 
-    /// @dev Deploy Aqua, both mocks, and the app; mint the pool + demo budgets to deployer.
+    /// @dev Deploy Aqua and both mocks; mint the pool + demo budgets to deployer.
     function _deployCore(address deployer) internal returns (Deployed memory d) {
         d.aqua = new Aqua();
         d.nvdax = new MockERC20("NVIDIA xStock", "NVDAx", 18);
         d.usdc = new MockERC20("USD Coin", "USDC", 6);
-        d.app = new GapOptionsApp(IAqua(address(d.aqua)), STATE_VIEW);
-        // Deployable form of DemoTaker: lets an EOA frontend route buyOption through a
-        // contract that implements IGapOptionCallback.
-        d.taker = new GapTaker(IAqua(address(d.aqua)), address(d.app));
         d.deployer = deployer;
 
-        // Mint generously so there is liquidity to seed the pool AND USDC for the
-        // maker to ship as collateral (Ship.s.sol) and for takers to pay premiums.
+        // Mint generously so there is liquidity to seed the pool AND spare NVDAx/USDC
+        // left in the deployer's wallet for later use.
         d.nvdax.mint(deployer, NVDAX_POOL_BUDGET + NVDAX_WALLET_BUDGET);
         d.usdc.mint(deployer, USDC_POOL_BUDGET + USDC_WALLET_BUDGET);
     }
@@ -221,8 +212,6 @@ contract DeployGap is Script {
 
         string memory obj = "gap";
         vm.serializeAddress(obj, "aqua", address(d.aqua));
-        vm.serializeAddress(obj, "gapOptionsApp", address(d.app));
-        vm.serializeAddress(obj, "gapTaker", address(d.taker));
         vm.serializeAddress(obj, "maker", d.deployer);
         vm.serializeAddress(obj, "nvdax", address(d.nvdax));
         vm.serializeAddress(obj, "usdc", address(d.usdc));

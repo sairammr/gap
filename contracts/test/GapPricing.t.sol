@@ -5,22 +5,8 @@ import { Test } from "forge-std/Test.sol";
 
 import { GapPricing } from "../src/lib/GapPricing.sol";
 
-/// @notice Unit tests for the Black-Scholes (r = 0) capped-gap pricing library.
+/// @notice Unit tests for the Black-Scholes (r = 0) pricing library.
 contract GapPricingTest is Test {
-    /// @dev A capped ATM call with real vol must sit strictly between 0 and the cap.
-    function test_premium_cappedCall_withinBand() public pure {
-        uint256 p = GapPricing.premium(GapPricing.CALL, 100e18, 100e18, 5e18, 1 days, 0.6e18);
-        assertGt(p, 0);
-        assertLe(p, 5e18);
-    }
-
-    /// @dev Zero vol collapses to intrinsic value, then the cap: min(max(0,S-K),cap).
-    ///      S-K = 10e18, capped at 5e18.
-    function test_premium_zeroVol_returnsCappedIntrinsic() public pure {
-        uint256 p = GapPricing.premium(GapPricing.CALL, 110e18, 100e18, 5e18, 1 days, 0);
-        assertEq(p, 5e18);
-    }
-
     /// @dev An ATM vanilla call with zero vol has zero intrinsic value.
     function test_call_atm_zeroVol_isZero() public pure {
         assertEq(GapPricing.call(100e18, 100e18, 1 days, 0), 0);

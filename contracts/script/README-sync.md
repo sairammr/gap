@@ -1,8 +1,8 @@
 # Spot sync keeper — making NVDAx track the real NVDA share price
 
 `DeployGap.s.sol` seeds the Uniswap v4 NVDAx/USDC pool at a flat, fake **100.00 USDC/NVDAx**
-and then nothing ever moves it. Every premium `GapOptionsApp.quotePremium` returns is therefore
-priced off a constant, and the chart on the frontend is a flat line.
+and then nothing ever moves it. Any premium priced off that spot is therefore priced off a
+constant, and the chart on the frontend is a flat line.
 
 This keeper fixes that. It reads the **live NVDA share price** off a public quote endpoint and
 pushes the pool's spot onto it with a single Uniswap v4 swap.
@@ -210,8 +210,8 @@ error is the truncation in the integer `_sqrt` — about 5 parts in 1e20. Expect
 - **It is a centralised off-chain keeper, not an oracle.** Whoever holds `PRIVATE_KEY` decides
   what the pool thinks NVDA is worth. There is no signature, no aggregation, no dispute window,
   and nothing on-chain checks the number. This is a demo affordance. A real deployment wants a
-  Chainlink equity feed (or Data Stream + verifier) or a hook-maintained TWAP, with
-  `GapOptionsApp` reading that instead of raw v4 spot.
+  Chainlink equity feed (or Data Stream + verifier) or a hook-maintained TWAP instead of raw
+  v4 spot.
 - **The pool is a mock with thin liquidity.** ~1M NVDAx / 100M USDC of full-range liquidity.
   Any third party can move the spot with a modest swap, and the keeper will happily move it back
   on its next tick. Nothing here is manipulation-resistant.

@@ -44,7 +44,6 @@ import { usePositions, type Position } from './hooks/usePositions'
 import { KIND, previewPremium, cappedPremiumPerUnit, type OptionKind } from './lib/pricing'
 import { useSpotSeries } from './hooks/useSpotSeries'
 import { PriceChart } from './components/PriceChart'
-import { GapCurve } from './components/GapCurve'
 import { Earn } from './pages/Earn'
 import {
   ActivityList,
@@ -791,26 +790,10 @@ export default function App() {
                     tabs={[
                       { value: 'positions', label: 'Positions', count: positions.length },
                       { value: 'strikes', label: 'Strike ladder' },
-                      { value: 'gap', label: 'Gap projection' },
                     ]}
                   />
                   {wsTab === 'positions' && positionsTable}
                   {wsTab === 'strikes' && strikeLadder}
-                  {wsTab === 'gap' && (
-                    <div className="vx-panel__body">
-                      <GapCurve
-                        spot={spotPrice}
-                        kind={kind}
-                        strike={strike}
-                        cap={cap}
-                        size={size}
-                        premium={bindingPremium}
-                        vol={vol}
-                        secondsToExpiry={secondsToExpiry}
-                        history={closes}
-                      />
-                    </div>
-                  )}
                 </Card>
               </div>
 
