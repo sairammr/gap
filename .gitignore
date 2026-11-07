@@ -25,5 +25,5 @@ contracts/node_modules/
 app/node_modules/
 app/dist/
 
-# Claude Code worktrees
-.claude/worktrees/
+# Claude Code session state and worktrees
+.claude/
