@@ -275,7 +275,7 @@ function QuoteBooksCard({ b }: { b: QuoteBooks }) {
           rows={
             isAsk && b.cap.side === 'ask'
               ? [
-                  ['Strategy hash', <code key="h">{b.quote.strategyHash}</code>],
+                  ['Strategy hash', <code key="h" title={b.quote.strategyHash}>{`${b.quote.strategyHash.slice(0, 10)}…${b.quote.strategyHash.slice(-8)}`}</code>],
                   [
                     'Cover committed',
                     `${Number(formatUnits(b.cap.coverCommitted, coverDp)).toFixed(2)} ${coverSymbol}`,
@@ -285,12 +285,12 @@ function QuoteBooksCard({ b }: { b: QuoteBooks }) {
                     `${Number(formatUnits(b.cap.coverWallet, coverDp)).toFixed(2)} ${coverSymbol}`,
                   ],
                   ['Short cap headroom', `${u(b.cap.shortHeadroom).toFixed(2)} options`],
-                  ['Inventory held', `${u(b.cap.inventory).toFixed(2)} ${b.symbol} (minted just-in-time)`],
+                  ['Inventory held', `${u(b.cap.inventory).toFixed(2)} ${b.symbol} · minted JIT`],
                   ['Gate', b.hashOk ? 'router.hash matches shipped' : 'HASH MISMATCH'],
                   ['Min premium', `${b.quote.minPremiumBps} bps floor`],
                 ]
               : [
-                  ['Strategy hash', <code key="h">{b.quote.strategyHash}</code>],
+                  ['Strategy hash', <code key="h" title={b.quote.strategyHash}>{`${b.quote.strategyHash.slice(0, 10)}…${b.quote.strategyHash.slice(-8)}`}</code>],
                   [
                     'USDC in wallet',
                     `${q6(b.cap.side === 'bid' ? b.cap.walletUsdc : 0n).toFixed(2)} USDC`,

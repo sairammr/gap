@@ -322,8 +322,8 @@ export function EarnShip({ deployment, deployed, onToast }: EarnShipProps) {
                 setChecks([])
               }}
               options={[
-                { value: 'ask', label: 'Ask · sell options' },
-                { value: 'bid', label: 'Bid · buy them back' },
+                { value: 'ask', label: 'Ask' },
+                { value: 'bid', label: 'Bid' },
               ]}
             />
           </Field>
@@ -340,7 +340,9 @@ export function EarnShip({ deployment, deployed, onToast }: EarnShipProps) {
               inputMode="numeric"
             />
           </Field>
-          <Field label={side === 'ask' ? 'Cap (options)' : 'Budget (USDC)'}>
+          <Field
+            label={side === 'ask' ? 'Cap — options to sell' : 'Budget — USDC to spend'}
+          >
             <Input value={amount} onChange={(e) => setAmount(e.target.value)} inputMode="decimal" />
           </Field>
           <Field label="Deadline (days)">
