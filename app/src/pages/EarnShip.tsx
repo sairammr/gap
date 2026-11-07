@@ -357,8 +357,8 @@ export function EarnShip({ deployment, deployed, onToast }: EarnShipProps) {
             [
               'Salt',
               <span key="s" className="vx-row">
-                <code>
-                  {salt.slice(0, 18)}…{salt.slice(-6)}
+                <code title={salt}>
+                  {salt.slice(0, 10)}…{salt.slice(-4)}
                 </code>
                 <Button
                   size="sm"

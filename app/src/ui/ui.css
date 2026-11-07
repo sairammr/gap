@@ -964,3 +964,8 @@
 /* A value cell whose content is a flex row (a hash beside a button) ignores
    text-align, so it has to be pushed to the end explicitly. */
 .vx-kv__v > .vx-row { justify-content: flex-end; flex-wrap: nowrap; }
+
+/* `overflow-wrap: anywhere` on the value lets a bare hash break mid-string,
+   which is right for a value on its own and wrong next to a button — there
+   the hash has to stay one line and give the button its width. */
+.vx-kv__v > .vx-row > code { white-space: nowrap; }
