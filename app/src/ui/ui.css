@@ -743,3 +743,119 @@
 .ck-price b { font: 700 38px/44px var(--sans); letter-spacing: -0.035em; font-variant-numeric: tabular-nums; }
 .ck-tools { display: flex; align-items: center; gap: var(--s-2); }
 .ck-icons { display: flex; align-items: center; gap: 2px; }
+
+/* ============================================================================
+   Trade desk layout + resting-order book.
+
+   These eight classes were used by App.tsx from the first commit and never
+   existed in any stylesheet, so `vx-grid--trade` fell back to a single column
+   and `vx-book` had no grid at all — which is why the book rendered as one run
+   of unspaced text ("CALL 100 · #060%92.43") and the order ticket sat below a
+   full-height chart. Everything here is layout; no component markup changed.
+   ========================================================================= */
+
+/* Narrow: one column, and the TICKET comes first. Trading is the job; the chart
+   is reference. Nobody should scroll past a 500px chart to reach the buy button. */
+.vx-grid--trade { grid-template-columns: minmax(0, 1fr); }
+.vx-col--ticket { order: -1; }
+.vx-col--book { order: 0; }
+
+/* Wide: book | chart + positions | ticket, the three-column desk. */
+@media (min-width: 1240px) {
+  .vx-grid--trade {
+    grid-template-columns: 288px minmax(0, 1fr) 376px;
+    align-items: start;
+  }
+  .vx-col--ticket,
+  .vx-col--book { order: 0; }
+  /* The ticket is the one thing that should never scroll out of reach. */
+  .vx-col--ticket { position: sticky; top: var(--s-4); }
+}
+
+/* -- the book ------------------------------------------------------------- */
+
+.vx-book { display: flex; flex-direction: column; padding: 0 var(--s-2) var(--s-2); }
+
+.vx-book__hd,
+.vx-book__row,
+.vx-book__mid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 56px 42px 62px;
+  gap: var(--s-2);
+  align-items: center;
+}
+
+.vx-book__hd {
+  padding: var(--s-2) var(--s-2) var(--s-1);
+  font: var(--t-caption);
+  color: var(--muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.vx-book__row {
+  width: 100%;
+  padding: 10px var(--s-2);
+  border: 1px solid transparent;
+  border-radius: 8px;
+  background: none;
+  font: 500 13px/18px var(--sans);
+  font-variant-numeric: tabular-nums;
+  text-align: left;
+  cursor: pointer;
+  transition: background 120ms ease, border-color 120ms ease;
+}
+.vx-book__row:hover { background: var(--surface-sunken); }
+.vx-book__row.is-active { background: var(--surface-sunken); border-color: var(--line-strong); }
+.vx-book__row:focus-visible { outline: 2px solid var(--focus); outline-offset: 1px; }
+/* Columns 2 and 3 are data, so they read as data. */
+.vx-book__row > span:nth-child(2),
+.vx-book__row > span:nth-child(3) { color: var(--muted); font: 400 12px/18px var(--mono); }
+
+/* The live spot, separating asks above from bids below. */
+.vx-book__mid {
+  margin: var(--s-2) 0;
+  padding: var(--s-2);
+  border-top: 1px dashed var(--line);
+  border-bottom: 1px dashed var(--line);
+  font: var(--t-caption);
+  color: var(--muted);
+}
+.vx-book__mid b { font: 600 15px/20px var(--mono); color: var(--ink); }
+
+.vx-book__empty {
+  padding: var(--s-3) var(--s-2);
+  font: var(--t-body-s);
+  color: var(--muted);
+}
+
+/* Placeholder text where a value would otherwise be missing. */
+.vx-dim { color: var(--muted); font: var(--t-body-s); }
+
+/* The trade stat tiles under the order book: one narrow column, so they stack
+   instead of trying to hold a 4-wide row at book width. */
+.vx-grid--stats-stacked { grid-template-columns: 1fr; }
+
+
+/* A history row's transaction, as a link out to the explorer. */
+.vx-tx {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--muted);
+  text-decoration: none;
+}
+
+.vx-tx:hover { color: var(--brand-violet); text-decoration: underline; }
+
+
+/* The series cell keeps one line. Wrapping it turns a four-column book into a
+   ragged two-line list and the numbers stop lining up down the column. */
+.vx-book__row > span:first-child,
+.vx-book__hd > span:first-child {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}

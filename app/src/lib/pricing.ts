@@ -76,7 +76,7 @@ export type OptionKind = typeof CALL | typeof PUT
 
 /**
  * Premium of a plain (uncapped) option, quote-per-1-unit of underlying (NOT scaled by
- * size). Weekend options are vanilla calls/puts — WeekendOptions.quotePremium calls
+ * size). GAP options are vanilla calls/puts — WeekendOptions.quotePremium calls
  * GapPricing.call/put directly with no cap. This is the UI estimate only; the binding
  * number is the on-chain quotePremium read.
  */

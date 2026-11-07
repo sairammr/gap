@@ -16,8 +16,15 @@ export const QUOTE_DECIMALS = 6
 export interface Position {
   seriesId: number
   kind: OptionKind
-  /** Strike in quote units (USD), e.g. 99.999999. */
+  /** Strike in quote units (USD), e.g. 99.999999. DISPLAY ONLY — it is a double. */
   strike: number
+  /**
+   * The strike exactly as the chain holds it, 6dp. `exercise` on a CALL pulls
+   * `ceil(amount * strike / 1e18)` USDC and the approval must cover it to the wei;
+   * routing that through `strike` loses precision at large strikes and the approval
+   * comes up one unit short.
+   */
+  strikeRaw: bigint
   /** Unix seconds. */
   expiry: number
   /** The per-series option ERC-20. */
@@ -31,6 +38,12 @@ export interface Position {
   totalSupply: bigint
   /** Settlement price in quote units, valid only when `settled`. */
   settlePrice: number
+  /**
+   * `oracle.recorded(underlying, expiry)`. `settle` reverts `OracleNotReady` until
+   * this is true, so the UI has to offer the record step separately rather than
+   * presenting a Settle button that can only fail.
+   */
+  priceRecorded: boolean
 }
 
 /** The getSeries(id) return tuple, in Solidity order (WeekendOptions.sol:58). */
@@ -62,11 +75,14 @@ export function toPosition(
   balance: bigint,
   written: bigint,
   totalSupply: bigint,
+  priceRecorded = false,
 ): Position {
   return {
+    priceRecorded,
     seriesId,
     kind: (ser.kind === 1 ? KIND.PUT : KIND.CALL) as OptionKind,
     strike: num(ser.strike, QUOTE_DECIMALS),
+    strikeRaw: ser.strike,
     expiry: Number(ser.expiry),
     token: ser.token,
     settled: ser.settled,

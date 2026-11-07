@@ -1,41 +1,47 @@
 /* ============================================================================
-   Weekend Options desk — the trade interface.
+   GAP desk — the trade interface.
 
    Layout follows kuru.io/trade 1:1: resting orders listed on the LEFT (one row
    per shipped maker quote, ASK green above / BID red below the v4 mid), the
    chart + position tabs in the CENTER, and the Buy/Sell order ticket on the
    RIGHT. Clicking a resting order loads its series + maker into the ticket.
 
-   The product is WeekendOptions on 1inch Aqua (Base Sepolia): fully-collateralised
+   The product is GAP on 1inch Aqua (Base Sepolia): fully-collateralised
    physically-settled CALL/PUT on NVDAx, one ERC-20 per series, priced + settled in
    USDC. Fills go through the REAL AquaSwapVMRouter — the exact path proven on-chain
    in contracts/script/Lifecycle.s.sol:
-     Buy  = swap(ASK order, usdcIn,  tt(usdc, minOptionsOut))   exact-in USDC
-     Sell = swap(BID order, optIn,   tt(option, minUsdcOut))    exact-in options
+     Buy  = swap(ASK order, optionsOut, tt(usdc,   maxIn,  exactOut))
+     Sell = swap(BID order, optionsIn,  tt(option, minOut, exactIn))
    Every order is rebuilt in-app (lib/orders.ts, byte-identical to OrderLib.sol)
    and GATED (router.hash(order) == the shipped strategyHash) before any fill.
+
+   The BUY is exact-OUT on purpose. `WeekendPricer._fillMissingLeg` derives whichever
+   amount the taker did not name, so an exact-in buy of "premium + slack" quietly
+   returns `slack` more options than the ticket said. Naming the option count makes
+   the number on screen the number that lands, and the slack becomes a `maxIn`.
    ========================================================================= */
 
-import { useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import {
   Activity as ActivityIcon,
   Anchor,
   ArrowLeftRight,
-  BookOpen,
   Clock,
   Coins,
+  ExternalLink,
   Inbox,
   Layers,
   Lock,
   TrendingDown,
   TrendingUp,
   Wallet,
-  Palette,
+  Presentation,
 } from 'lucide-react'
 import { useAccount, usePublicClient, useWriteContract } from 'wagmi'
 import { usePrivy } from '@privy-io/react-auth'
 import { formatUnits, parseUnits } from 'viem'
-import { erc20Abi, optionTokenAbi, routerAbi, weekendOptionsAbi } from './lib/abi'
+import { erc20Abi, optionTokenAbi, oracleAbi, routerAbi, weekendOptionsAbi } from './lib/abi'
+import { readCapacity, type Capacity } from './lib/capacity'
 import {
   loadDeployment,
   isDeployed,
@@ -46,7 +52,7 @@ import {
   type Deployment,
   type MakerQuote,
 } from './lib/deployment'
-import { volPct } from './lib/strategy'
+import { pricingStrategy, volPct } from './lib/strategy'
 import { orderForQuote, takerTraits } from './lib/orders'
 import { usePositions, type Position, type HistoryRow } from './hooks/usePositions'
 import { KIND, premiumPerUnit, type OptionKind } from './lib/pricing'
@@ -75,13 +81,16 @@ import {
   Toast,
 } from './ui'
 
+const BASESCAN = 'https://sepolia.basescan.org'
+
+/** No ceiling. See the quote call in `handleBuy`. */
+const MAX_UINT256 = (1n << 256n) - 1n
+
 const NAV = [
   { key: 'trade', label: 'Trade', icon: <ArrowLeftRight size={16} /> },
   { key: 'earn', label: 'Earn', icon: <Anchor size={16} /> },
   { key: 'positions', label: 'Positions', icon: <Layers size={16} /> },
-  { key: 'activity', label: 'History', icon: <ActivityIcon size={16} /> },
-  { key: 'docs', label: 'How it settles', icon: <BookOpen size={16} /> },
-  { key: 'kit', label: 'UI kit', icon: <Palette size={16} /> },
+  { key: 'pitch', label: 'Pitch', icon: <Presentation size={16} /> },
 ]
 
 const VIEW_KEYS = NAV.map((n) => n.key)
@@ -90,9 +99,41 @@ function viewFromHash(): string {
   return VIEW_KEYS.includes(h) ? h : 'trade'
 }
 
-/** Series kind read from chain, keyed by seriesId. JSON carries no kind, so the
- *  resting rows show CALL until this resolves (both deployed series are CALL). */
-type KindMap = Record<number, OptionKind>
+/** Per-series facts read from `getSeries`, keyed by seriesId.
+ *
+ *  Chain truth, not JSON truth: the deployment file carries `strike`/`expiry` for
+ *  the two series it happened to create, but `kind` not at all, and it goes stale
+ *  the moment anyone calls `createSeries`. Everything the ticket shows is derived
+ *  from here, with the JSON used only to find the addresses. `strikeRaw` stays a
+ *  bigint — the float beside it is for display and nothing else. */
+interface SeriesMeta {
+  kind: OptionKind
+  strikeRaw: bigint
+  strike: number
+  expiry: number
+  settled: boolean
+}
+type KindMap = Record<number, SeriesMeta>
+
+/** A write, described in full before it is allowed to open a wallet. */
+interface PendingAction {
+  title: string
+  /** What the user is about to sign, in plain words. */
+  summary: string
+  /** label -> value. "You pay", "You receive", "Your balance". */
+  rows: [string, string][]
+  /** Set when the wallet cannot cover it; `run` is then never offered. */
+  blocked?: string
+  /** How many wallet prompts this will open, so the count is never a surprise. */
+  steps: number
+  run: () => Promise<void>
+}
+
+/** The wallet balances every action preview is checked against. */
+interface Balances {
+  usdc: bigint
+  nvdax: bigint
+}
 
 export default function App() {
   const { address, isConnected } = useAccount()
@@ -107,8 +148,17 @@ export default function App() {
 
   const [view, setView] = useState(viewFromHash)
   const [wsTab, setWsTab] = useState('positions')
-  const [confirm, setConfirm] = useState(false)
   const [toast, setToast] = useState<string | null>(null)
+
+  /* Every write goes through here first.
+   *
+   * The old flow opened a wallet prompt straight off a button: clicking Exercise
+   * asked for a 756.97 USDC approval with nothing on screen saying what was being
+   * paid or received, and the only sane reaction was to reject it. An action now
+   * has to describe itself — what you pay, what you get, what you hold — and is
+   * BLOCKED before the wallet ever opens if the balance cannot cover it. */
+  const [pending, setPending] = useState<PendingAction | null>(null)
+  const [running, setRunning] = useState(false)
 
   useEffect(() => {
     loadDeployment()
@@ -135,7 +185,11 @@ export default function App() {
   // The shipped resting orders, straight from the deployment (no log scan to paint).
   const quotes = useMemo(() => (deployment ? makerQuotes(deployment) : []), [deployment])
 
-  // Series kind + strike/expiry, read once from chain so the rows are accurate.
+  // Bumped after every write so the series facts and the capacity ceilings re-read.
+  // Positions have their own `refetch`; `refreshAll` fires both.
+  const [refreshKey, setRefreshKey] = useState(0)
+
+  // Series facts, read from chain so every row and the ticket agree with the contract.
   const [kinds, setKinds] = useState<KindMap>({})
   useEffect(() => {
     if (!deployed || !deployment || !publicClient) return
@@ -148,8 +202,15 @@ export default function App() {
           abi: weekendOptionsAbi,
           functionName: 'getSeries',
           args: [BigInt(id)],
-        })) as { kind: number }
-        return [id, (ser.kind === 1 ? KIND.PUT : KIND.CALL) as OptionKind] as const
+        })) as { kind: number; strike: bigint; expiry: bigint; settled: boolean }
+        const meta: SeriesMeta = {
+          kind: (ser.kind === 1 ? KIND.PUT : KIND.CALL) as OptionKind,
+          strikeRaw: ser.strike,
+          strike: Number(formatUnits(ser.strike, QUOTE_DECIMALS)),
+          expiry: Number(ser.expiry),
+          settled: ser.settled,
+        }
+        return [id, meta] as const
       }),
     )
       .then((entries) => {
@@ -159,7 +220,7 @@ export default function App() {
     return () => {
       cancelled = true
     }
-  }, [deployed, deployment, publicClient, quotes])
+  }, [deployed, deployment, publicClient, quotes, refreshKey])
 
   // --- ticket state ---------------------------------------------------------
   // The ticket trades ONE selected resting order. Buy fills an ASK, sell fills a
@@ -177,17 +238,10 @@ export default function App() {
 
   const [size, setSize] = useState(1) // option units (18dp notional)
 
-  const seriesKind = selected ? (kinds[selected.seriesId] ?? KIND.CALL) : KIND.CALL
-  const strikeUsd = useMemo(() => {
-    if (!deployment || !selected) return 0
-    return selected.seriesId === deployment.shortSeriesId
-      ? deployment.shortStrike / 10 ** QUOTE_DECIMALS
-      : deployment.strike / 10 ** QUOTE_DECIMALS
-  }, [deployment, selected])
-  const expiry = useMemo(() => {
-    if (!deployment || !selected) return 0
-    return selected.seriesId === deployment.shortSeriesId ? deployment.shortExpiry : deployment.expiry
-  }, [deployment, selected])
+  const meta = selected ? kinds[selected.seriesId] : undefined
+  const seriesKind = meta?.kind ?? KIND.CALL
+  const strikeUsd = meta?.strike ?? 0
+  const expiry = meta?.expiry ?? 0
   const secondsToExpiry = Math.max(0, expiry - Math.floor(Date.now() / 1000))
   const vol = selected ? Number(selected.volWad) / 1e18 : 0.6
 
@@ -197,6 +251,48 @@ export default function App() {
     [selected, seriesKind, spotPrice, strikeUsd, secondsToExpiry, vol],
   )
   const previewTotal = previewUnit * size
+
+  /* --- the book's own premiums -------------------------------------------
+   *
+   * One `quotePremium` per resting quote, priced for ONE option so the column
+   * is comparable across rows of different size. These are the binding numbers,
+   * not the client-side preview: a book that quotes one price and fills at
+   * another is worse than a book with no prices in it.
+   *
+   * Keyed by `q.key` and re-read when spot moves, for the same reason the
+   * ticket does — the pool price is the one input to a premium that changes
+   * on its own. */
+  const [premiums, setPremiums] = useState<Record<string, number>>({})
+  useEffect(() => {
+    if (!deployed || !deployment || !publicClient || quotes.length === 0) {
+      setPremiums({})
+      return
+    }
+    let cancelled = false
+    void Promise.all(
+      quotes.map(async (q) => {
+        try {
+          const p = (await publicClient.readContract({
+            address: deployment.weekendOptions as `0x${string}`,
+            abi: weekendOptionsAbi,
+            functionName: 'quotePremium',
+            args: [pricingStrategy(deployment, q), BigInt(q.seriesId), parseUnits('1', UNDERLYING_DECIMALS)],
+          })) as bigint
+          return [q.key, Number(formatUnits(p, QUOTE_DECIMALS))] as const
+        } catch {
+          // A series the desk never listed, or one past expiry: leave the cell
+          // blank rather than printing a zero that reads like a free option.
+          return [q.key, Number.NaN] as const
+        }
+      }),
+    ).then((entries) => {
+      if (cancelled) return
+      setPremiums(Object.fromEntries(entries.filter(([, v]) => Number.isFinite(v))))
+    })
+    return () => {
+      cancelled = true
+    }
+  }, [deployed, deployment, publicClient, quotes, spotPrice])
 
   // --- binding on-chain quote: quotePremium for the premium shown ----------
   const [onchainPremium, setOnchainPremium] = useState<number | null>(null)
@@ -214,7 +310,7 @@ export default function App() {
         abi: weekendOptionsAbi,
         functionName: 'quotePremium',
         args: [
-          strategyFromQuote(deployment, selected),
+          pricingStrategy(deployment, selected),
           BigInt(selected.seriesId),
           parseUnits(String(size), UNDERLYING_DECIMALS),
         ],
@@ -231,43 +327,95 @@ export default function App() {
     return () => {
       cancelled = true
     }
-  }, [deployed, deployment, publicClient, selected, size])
+  }, [deployed, deployment, publicClient, selected, size, spotPrice])
 
   const bindingPremium = onchainPremium ?? previewTotal
 
-  // --- maker backable capacity (the real ceiling on size) ------------------
-  const [backable, setBackable] = useState<number | null>(null)
+  /* --- how much each resting quote can actually fill ----------------------
+   *
+   * Three ceilings bind an ask and the smallest wins; `lib/capacity.ts` reads all
+   * of them. Deliberately NOT `makerCapacity` — that hashes the Strategy tuple to
+   * key the Aqua ledger, and no tuple rebuildable from this JSON hashes to one the
+   * desk shipped, so it answered 0 against a desk holding ~9,982 NVDAx.
+   *
+   * Read for EVERY quote, not just the selected one, so the book rows can show a
+   * real size instead of repeating the side back at the user. */
+  const [caps, setCaps] = useState<Record<string, Capacity>>({})
   useEffect(() => {
     let cancelled = false
-    if (!deployed || !deployment || !publicClient || !selected) {
-      setBackable(null)
+    if (!tradable || !deployment || !publicClient || quotes.length === 0) {
+      setCaps({})
       return
     }
-    // CALL cover is underlying (NVDAx, 18dp); PUT cover is USDC (6dp).
-    const token = seriesKind === KIND.CALL ? deployment.nvdax : deployment.usdc
-    const dec = seriesKind === KIND.CALL ? UNDERLYING_DECIMALS : QUOTE_DECIMALS
-    publicClient
-      .readContract({
-        address: deployment.weekendOptions as `0x${string}`,
-        abi: weekendOptionsAbi,
-        functionName: 'makerCapacity',
-        args: [strategyFromQuote(deployment, selected), token as `0x${string}`],
-      })
-      .then((res) => {
-        if (cancelled) return
-        const b = (res as readonly [bigint, bigint, bigint])[2]
-        setBackable(Number(formatUnits(b, dec)))
+    // Needs the series facts first; the PUT cover conversion divides by the strike.
+    const ready = quotes.filter((q) => kinds[q.seriesId])
+    if (ready.length === 0) return
+    void Promise.all(
+      ready.map(async (q) => {
+        const m = kinds[q.seriesId]
+        return [q.key, await readCapacity(publicClient, deployment, q, m.kind, m.strikeRaw)] as const
+      }),
+    )
+      .then((entries) => {
+        if (!cancelled) setCaps(Object.fromEntries(entries))
       })
       .catch(() => {
-        if (!cancelled) setBackable(null)
+        if (!cancelled) setCaps({})
       })
     return () => {
       cancelled = true
     }
-  }, [deployed, deployment, publicClient, selected, seriesKind])
+  }, [tradable, deployment, publicClient, quotes, kinds, refreshKey])
+
+  const cap = selected ? caps[selected.key] : undefined
+  /** Options this quote can still fill. A bid's USDC budget is converted at the
+   *  binding premium, which is what the taker would actually be paid. */
+  const availableOptions = useMemo(() => {
+    if (!cap) return null
+    if (cap.side === 'ask') return Number(formatUnits(cap.options, UNDERLYING_DECIMALS))
+    const perOption = bindingPremium / Math.max(size, 1e-9)
+    if (perOption <= 0) return null
+    return Number(formatUnits(cap.usdc, QUOTE_DECIMALS)) / perOption
+  }, [cap, bindingPremium, size])
+
+  const overCapacity = availableOptions != null && size > availableOptions
 
   // Positions + history off the chain.
   const chain = usePositions(deployment, deployed, address)
+
+  /** Re-read everything a write could have moved. */
+  const refreshAll = useCallback(() => {
+    setRefreshKey((n) => n + 1)
+    chain.refetch()
+  }, [chain])
+
+  // The wallet's spendable balances — what every action preview is checked against.
+  const [bal, setBal] = useState<Balances>({ usdc: 0n, nvdax: 0n })
+  useEffect(() => {
+    if (!deployed || !deployment || !publicClient || !address) return
+    let cancelled = false
+    void Promise.all([
+      publicClient.readContract({
+        address: deployment.usdc as `0x${string}`,
+        abi: erc20Abi,
+        functionName: 'balanceOf',
+        args: [address],
+      }) as Promise<bigint>,
+      publicClient.readContract({
+        address: deployment.nvdax as `0x${string}`,
+        abi: erc20Abi,
+        functionName: 'balanceOf',
+        args: [address],
+      }) as Promise<bigint>,
+    ])
+      .then(([usdc, nvdax]) => {
+        if (!cancelled) setBal({ usdc, nvdax })
+      })
+      .catch(() => {})
+    return () => {
+      cancelled = true
+    }
+  }, [deployed, deployment, publicClient, address, refreshKey])
 
   /* -- actions ------------------------------------------------------------ */
 
@@ -290,16 +438,35 @@ export default function App() {
       return
     }
 
-    // Spend the quoted premium + a little slack, exact-in USDC.
-    const premiumIn = parseUnits((bindingPremium * 1.02).toFixed(QUOTE_DECIMALS), QUOTE_DECIMALS)
-    const ttQuote = takerTraits(deployment.usdc, selected.optionToken, deployment.usdc, 1n)
-    const [, quotedOut] = (await publicClient.readContract({
+    /* EXACT-OUT. The taker names an option COUNT and pays the ceiling for it.
+     *
+     * Exact-in was wrong here in a way that does not revert: `_fillMissingLeg`
+     * derives `amountOut = amountIn * 1e18 / premium`, so sending "premium + 2%
+     * slack" bought 1.02 options for a ticket that said 1.00, and the confirm
+     * modal said 1.00. Naming the out leg makes the number on screen the number
+     * that lands; the slack moves to `maxIn`, where it belongs. */
+    const optionsOut = parseUnits(String(size), UNDERLYING_DECIMALS)
+
+    // Price it first so the approval and the ceiling are the router's own numbers,
+    // not the preview's. Threshold 0 on a quote = no threshold (NOT "free").
+    /* The threshold is NOT "unset" at zero. On an exact-OUT fill it is the max-IN
+     * ceiling, and the router enforces it inside `quote` exactly as it does inside
+     * `swap` — so quoting with 0 asks "price this, given I will pay at most
+     * nothing" and reverts instead of returning a price. Quote unbounded, then put
+     * the real ceiling on the swap below. */
+    const ttQuote = takerTraits(deployment.usdc, selected.optionToken, deployment.usdc, MAX_UINT256, false)
+    const [quotedIn] = (await publicClient.readContract({
       address: router,
       abi: routerAbi,
       functionName: 'quote',
-      args: [order, premiumIn, ttQuote],
+      args: [order, optionsOut, ttQuote],
     })) as readonly [bigint, bigint, `0x${string}`]
-    const minOut = (quotedOut * 95n) / 100n
+    if (quotedIn === 0n) {
+      setToast('Router quoted zero — refusing to send')
+      return
+    }
+    // 2% ceiling, so a tick of the v4 spot between quote and mine does not revert.
+    const maxIn = (quotedIn * 102n) / 100n
 
     const allowance = (await publicClient.readContract({
       address: deployment.usdc as `0x${string}`,
@@ -307,28 +474,28 @@ export default function App() {
       functionName: 'allowance',
       args: [address, router],
     })) as bigint
-    if (allowance < premiumIn) {
+    if (allowance < maxIn) {
       setToast('Approving USDC for the router…')
       const approveHash = await writeContractAsync({
         address: deployment.usdc as `0x${string}`,
         abi: erc20Abi,
         functionName: 'approve',
-        args: [router, premiumIn],
+        args: [router, maxIn],
       })
       await publicClient.waitForTransactionReceipt({ hash: approveHash })
     }
 
-    const ttSwap = takerTraits(deployment.usdc, selected.optionToken, deployment.usdc, minOut)
+    const ttSwap = takerTraits(deployment.usdc, selected.optionToken, deployment.usdc, maxIn, false)
     const buyHash = await writeContractAsync({
       address: router,
       abi: routerAbi,
       functionName: 'swap',
-      args: [order, premiumIn, ttSwap],
+      args: [order, optionsOut, ttSwap],
     })
     setToast('Buy submitted via SwapVM router')
     await publicClient.waitForTransactionReceipt({ hash: buyHash })
-    chain.refetch()
-    setToast('Options bought')
+    refreshAll()
+    setToast(`Bought ${size} option${size === 1 ? '' : 's'}`)
   }
 
   // Sell: fill the selected BID. Exact-in options, USDC out (mirror Lifecycle.sellBack).
@@ -348,14 +515,19 @@ export default function App() {
       return
     }
 
+    // Exact-in: the taker names the options it delivers and takes what the bid pays.
     const optionIn = parseUnits(String(size), UNDERLYING_DECIMALS)
-    const ttQuote = takerTraits(deployment.usdc, selected.optionToken, selected.optionToken, 1n)
+    const ttQuote = takerTraits(deployment.usdc, selected.optionToken, selected.optionToken, 0n)
     const [, quotedUsdc] = (await publicClient.readContract({
       address: router,
       abi: routerAbi,
       functionName: 'quote',
       args: [order, optionIn, ttQuote],
     })) as readonly [bigint, bigint, `0x${string}`]
+    if (quotedUsdc === 0n) {
+      setToast('Bid quoted zero — refusing to send')
+      return
+    }
     const minOut = (quotedUsdc * 95n) / 100n
 
     const allowance = (await publicClient.readContract({
@@ -384,14 +556,62 @@ export default function App() {
     })
     setToast('Sell submitted via SwapVM router')
     await publicClient.waitForTransactionReceipt({ hash: sellHash })
-    chain.refetch()
+    refreshAll()
     setToast('Options sold into the bid')
   }
 
-  async function onPlace() {
-    setConfirm(false)
-    if (tab === 'buy') await handleBuy()
-    else await handleSell()
+  /** Describe the trade, check the wallet can pay for it, then offer it. */
+  function reviewTrade() {
+    if (!selected || !deployment) return
+    const cost = parseUnits(bindingPremium.toFixed(QUOTE_DECIMALS), QUOTE_DECIMALS)
+    const maxCost = (cost * 102n) / 100n
+    const label = `${isCall ? 'CALL' : 'PUT'} #${selected.seriesId} · strike ${strikeUsd.toFixed(2)}`
+
+    if (tab === 'buy') {
+      setPending({
+        title: `Buy ${size} ${size === 1 ? 'option' : 'options'}`,
+        summary: `${label}. You pay USDC now and get the right — never the obligation — to buy ${size} NVDAx at ${strikeUsd.toFixed(2)} each, any time before expiry.`,
+        rows: [
+          ['You pay', `~${bindingPremium.toFixed(2)} USDC (max ${fmtQ(maxCost)})`],
+          ['You receive', `${size} ${isCall ? 'CALL' : 'PUT'} option${size === 1 ? '' : 's'}`],
+          ['Your USDC', fmtQ(bal.usdc)],
+          ['Expires', new Date(expiry * 1000).toLocaleString()],
+        ],
+        blocked:
+          bal.usdc < maxCost
+            ? `Not enough USDC — you need about ${fmtQ(maxCost)} and hold ${fmtQ(bal.usdc)}. Use the “Test USDC” button up top.`
+            : undefined,
+        steps: 2,
+        run: handleBuy,
+      })
+      return
+    }
+
+    setPending({
+      title: `Sell ${size} ${size === 1 ? 'option' : 'options'}`,
+      summary: `${label}. You hand the options back to the desk and take USDC at its bid, which is priced at a lower vol than the ask — that spread is the desk's.`,
+      rows: [
+        ['You deliver', `${size} option${size === 1 ? '' : 's'}`],
+        ['You receive', `~${bindingPremium.toFixed(2)} USDC`],
+      ],
+      steps: 2,
+      run: handleSell,
+    })
+  }
+
+  /** Run whatever is in the modal, keeping errors on screen instead of in the console. */
+  async function runPending() {
+    const action = pending
+    if (!action || action.blocked) return
+    setPending(null)
+    setRunning(true)
+    try {
+      await action.run()
+    } catch (e) {
+      setToast(friendlyError(e))
+    } finally {
+      setRunning(false)
+    }
   }
 
   async function mintTestUsdc() {
@@ -406,7 +626,7 @@ export default function App() {
   }
 
   // Exercise / close / settle / redeem / claim, all per-position (Positions tab).
-  const actions = usePositionActions(deployment, publicClient, writeContractAsync, setToast, chain.refetch)
+  const actions = usePositionActions(deployment, publicClient, writeContractAsync, setToast, refreshAll, bal)
 
   /* -- pieces ------------------------------------------------------------- */
 
@@ -441,6 +661,7 @@ export default function App() {
       <div className="vx-book">
         <div className="vx-book__hd">
           <span>Series</span>
+          <span style={{ textAlign: 'right' }}>Premium</span>
           <span style={{ textAlign: 'right' }}>IV</span>
           <span style={{ textAlign: 'right' }}>Size</span>
         </div>
@@ -450,8 +671,9 @@ export default function App() {
           <QuoteRow
             key={q.key}
             q={q}
-            kind={kinds[q.seriesId] ?? KIND.CALL}
-            strikeUsd={quoteStrike(deployment, q)}
+            meta={kinds[q.seriesId]}
+            cap={caps[q.key]}
+            premium={premiums[q.key]}
             active={selected?.key === q.key && tab === 'buy'}
             onClick={() => {
               setTab('buy')
@@ -469,8 +691,9 @@ export default function App() {
           <QuoteRow
             key={q.key}
             q={q}
-            kind={kinds[q.seriesId] ?? KIND.CALL}
-            strikeUsd={quoteStrike(deployment, q)}
+            meta={kinds[q.seriesId]}
+            cap={caps[q.key]}
+            premium={premiums[q.key]}
             active={selected?.key === q.key && tab === 'sell'}
             onClick={() => {
               setTab('sell')
@@ -541,18 +764,31 @@ export default function App() {
               block
               size="lg"
               loading={isPending}
-              disabled={!tradable || !isConnected || size <= 0 || noBindingQuote || sellDisabled}
+              disabled={
+                !tradable || !isConnected || size <= 0 || noBindingQuote || sellDisabled || overCapacity
+              }
               title={
                 noBindingQuote
                   ? 'No binding on-chain quote — trading is unsafe'
                   : sellDisabled
                     ? 'No resting bid to sell into'
-                    : undefined
+                    : overCapacity
+                      ? 'Larger than this quote can fill'
+                      : undefined
               }
-              onClick={() => setConfirm(true)}
+              onClick={reviewTrade}
             >
               {tab === 'buy' ? 'Buy options' : 'Sell into bid'}
             </Button>
+
+            {overCapacity && availableOptions != null && (
+              <Alert tone="warning" title="Over this quote's depth">
+                The shipped order can fill <b>{availableOptions.toFixed(2)}</b> more options.{' '}
+                {cap?.side === 'ask' && cap.options === cap.ledgerOptions
+                  ? 'The binding ceiling is the Aqua ledger — the shipped amount is a permanent cap, so re-offering needs a new salt.'
+                  : 'The binding ceiling is the collateral the desk can still back.'}
+              </Alert>
+            )}
 
             {noBindingQuote && (
               <Alert tone="warning" title="No binding quote">
@@ -570,10 +806,16 @@ export default function App() {
                   ['Expiry', new Date(expiry * 1000).toLocaleString()],
                   ['Implied vol', `${volPct(selected.volWad)}%`],
                   [
-                    'Maker can back',
-                    backable == null
+                    'Available',
+                    availableOptions == null ? '—' : `${availableOptions.toFixed(2)} options`,
+                  ],
+                  [
+                    tab === 'buy' ? 'Maker cover' : 'Maker budget',
+                    cap == null
                       ? '—'
-                      : `${backable.toFixed(isCall ? 2 : 2)} ${isCall ? 'NVDAx' : 'USDC'}`,
+                      : cap.side === 'ask'
+                        ? `${Number(formatUnits(cap.coverCommitted < cap.coverWallet ? cap.coverCommitted : cap.coverWallet, isCall ? UNDERLYING_DECIMALS : QUOTE_DECIMALS)).toFixed(2)} ${isCall ? 'NVDAx' : 'USDC'}`
+                        : `${Number(formatUnits(cap.usdc, QUOTE_DECIMALS)).toFixed(2)} USDC`,
                   ],
                   ['Exercise', 'physical — no price feed involved'],
                 ] as [string, string][]
@@ -600,7 +842,8 @@ export default function App() {
       loading={chain.loading}
       error={chain.error}
       actions={actions}
-      pending={isPending}
+      pending={isPending || running}
+      onReview={setPending}
     />
   )
 
@@ -610,7 +853,7 @@ export default function App() {
     <Backdrop>
       <div className="vx-shell">
         <TopNav
-          name="weekend options"
+          name="gap"
           items={NAV}
           active={view}
           onSelect={(k) => {
@@ -656,11 +899,9 @@ export default function App() {
 
           {view === 'trade' && (
             <div className="vx-grid vx-grid--trade">
-              <div className="vx-col vx-col--book">{restingOrders}</div>
-
-              <div className="vx-col">
-                {chartPanel}
-                <div className="vx-grid vx-grid--stats">
+              <div className="vx-col vx-col--book">
+                {restingOrders}
+                <div className="vx-grid vx-grid--stats vx-grid--stats-stacked">
                   <StatCard
                     pair="Spot (v4)"
                     color="#7b61ff"
@@ -681,13 +922,16 @@ export default function App() {
                     sub={isCall ? 'CALL — writer locks NVDAx' : 'PUT — writer locks USDC'}
                   />
                   <StatCard
-                    pair="Maker backs"
+                    pair="Available"
                     color="#f59e0b"
-                    value={backable == null ? '—' : backable.toFixed(2)}
-                    sub={isCall ? 'NVDAx committed' : 'USDC committed'}
+                    value={availableOptions == null ? '—' : availableOptions.toFixed(2)}
+                    sub="options this quote can still fill"
                   />
                 </div>
+              </div>
 
+              <div className="vx-col">
+                {chartPanel}
                 <Card>
                   <Tabs
                     aria-label="Workspace"
@@ -747,42 +991,43 @@ export default function App() {
         </main>
       </div>
 
+      {/* ONE review step for every write in the app — trade, exercise, close,
+          record, settle, redeem, claim. Nothing opens a wallet until what it costs
+          and what it returns has been on screen, and a balance that cannot cover it
+          blocks the button rather than letting the wallet reject it. */}
       <Modal
-        open={confirm}
-        title="Confirm order"
-        onClose={() => setConfirm(false)}
+        open={pending != null}
+        title={pending?.title ?? ''}
+        onClose={() => setPending(null)}
         footer={
           <>
-            <Button variant="primary" onClick={onPlace}>
-              {tab === 'buy' ? 'Confirm buy' : 'Confirm sell'}
+            <Button variant="primary" disabled={!!pending?.blocked} onClick={runPending}>
+              Confirm
             </Button>
-            <Button variant="secondary" onClick={() => setConfirm(false)}>
+            <Button variant="secondary" onClick={() => setPending(null)}>
               Cancel
             </Button>
           </>
         }
       >
-        {selected && (
-          <>
-            <Card sunken pad style={{ marginBottom: 12 }}>
-              <div className="vx-row">
-                <TokenDot symbol="N" color="#76b900" /> <b>NVDAx / USDC</b>
-              </div>
-              <div className={isCall ? 'vx-up' : 'vx-down'} style={{ font: '500 13px/18px var(--mono)', marginTop: 4 }}>
-                {tab === 'buy' ? 'Buy' : 'Sell'} {isCall ? 'CALL' : 'PUT'} · series {selected.seriesId} · K{' '}
-                {strikeUsd.toFixed(2)}
-              </div>
-            </Card>
-            <KeyValue
-              rows={[
-                ['Side', tab === 'buy' ? 'Buy (fill ask)' : 'Sell (fill bid)'],
-                ['Size', `${size.toFixed(2)} options`],
-                ['Strike', `${strikeUsd.toFixed(2)} USDC`],
-                ['Premium', `${bindingPremium.toFixed(QUOTE_DECIMALS)} USDC`],
-                ['Expiry', new Date(expiry * 1000).toLocaleString()],
-              ]}
-            />
-          </>
+        {pending && (
+          <div className="vx-col">
+            <p style={{ margin: 0, font: 'var(--t-body-l)', color: 'var(--ink-soft)' }}>
+              {pending.summary}
+            </p>
+            <KeyValue rows={pending.rows} />
+            {pending.blocked ? (
+              <Alert tone="error" title="Can't do this yet">
+                {pending.blocked}
+              </Alert>
+            ) : (
+              <Alert tone="info" title={`${pending.steps} wallet ${pending.steps === 1 ? 'prompt' : 'prompts'}`}>
+                {pending.steps === 1
+                  ? 'Your wallet will ask you to sign once.'
+                  : 'Your wallet will ask twice — first to approve the token, then to run the trade. Both are needed.'}
+              </Alert>
+            )}
+          </div>
         )}
       </Modal>
 
@@ -795,40 +1040,42 @@ export default function App() {
    Helpers + leaf components
    ========================================================================= */
 
-import { buildStrategy } from './lib/strategy'
-import type { StrategyTuple } from './lib/strategy'
-
-/** The on-chain Strategy tuple for a quote — quotePremium / makerCapacity want it. */
-function strategyFromQuote(d: Deployment, q: MakerQuote): StrategyTuple {
-  return buildStrategy(d, q)
-}
-
-function quoteStrike(d: Deployment | null, q: MakerQuote): number {
-  if (!d) return 0
-  return q.seriesId === d.shortSeriesId ? d.shortStrike / 10 ** QUOTE_DECIMALS : d.strike / 10 ** QUOTE_DECIMALS
-}
-
 function QuoteRow({
   q,
-  kind,
-  strikeUsd,
+  meta,
+  cap,
+  premium,
   active,
   onClick,
 }: {
   q: MakerQuote
-  kind: OptionKind
-  strikeUsd: number
+  meta: SeriesMeta | undefined
+  cap: Capacity | undefined
+  /** Binding per-option premium from `quotePremium`, or undefined while loading. */
+  premium: number | undefined
   active: boolean
   onClick: () => void
 }) {
   const ask = q.side === 'ask'
+  const kind = meta?.kind ?? KIND.CALL
+  // The Size column is the real remaining depth, not the side repeated back: for an
+  // ask the options still sellable, for a bid the USDC budget left to buy them with.
+  const size =
+    cap == null
+      ? '…'
+      : cap.side === 'ask'
+        ? `${Number(formatUnits(cap.options, UNDERLYING_DECIMALS)).toFixed(2)}`
+        : `$${Number(formatUnits(cap.usdc, QUOTE_DECIMALS)).toFixed(0)}`
   return (
     <button type="button" className={`vx-book__row${active ? ' is-active' : ''}`} onClick={onClick}>
       <span className={ask ? 'vx-up' : 'vx-down'}>
-        {kind === KIND.CALL ? 'CALL' : 'PUT'} {strikeUsd.toFixed(0)} · #{q.seriesId}
+        {kind === KIND.CALL ? 'CALL' : 'PUT'} {(meta?.strike ?? 0).toFixed(0)} · #{q.seriesId}
+      </span>
+      <span style={{ textAlign: 'right' }}>
+        {premium == null ? '…' : premium.toFixed(2)}
       </span>
       <span style={{ textAlign: 'right' }}>{volPct(q.volWad)}%</span>
-      <span style={{ textAlign: 'right' }}>{ask ? 'ASK' : 'BID'}</span>
+      <span style={{ textAlign: 'right' }}>{size}</span>
     </button>
   )
 }
@@ -863,12 +1110,35 @@ function Countdown({ expiry }: { expiry: number }) {
 const qfmt = (v: bigint) => Number(formatUnits(v, QUOTE_DECIMALS))
 const ufmt = (v: bigint) => Number(formatUnits(v, UNDERLYING_DECIMALS))
 
+/** 6dp quote units -> "1,234.56 USDC". */
+const fmtQ = (v: bigint) => `${qfmt(v).toLocaleString(undefined, { maximumFractionDigits: 2 })} USDC`
+/** 18dp -> "12.3457 NVDAx" (or options). */
+const fmtU = (v: bigint, unit = 'NVDAx') => `${ufmt(v).toFixed(4)} ${unit}`
+
+/**
+ * Wallet and RPC errors are several hundred characters of stack by default, which
+ * is why the old UI just swallowed them. Pull out the one line a person can act on.
+ */
+function friendlyError(e: unknown): string {
+  const msg = e instanceof Error ? e.message : String(e)
+  if (/User rejected|User denied|rejected the request/i.test(msg)) return 'Cancelled in your wallet'
+  if (/insufficient funds/i.test(msg)) return 'Not enough ETH for gas on Base Sepolia'
+  const named = msg.match(
+    /\b(NotExpired|AlreadySettled|OracleNotReady|CloseAfterExercise|Expired|BadAmount|PremiumTooHigh|PremiumBelowFloor|ZeroPremium|InsufficientMakerCollateral|ShortLimit|TenorTooLong|AlreadyRecorded|TooEarly|StrategiesMustBeImmutable)\b/,
+  )
+  if (named) return `Reverted: ${named[1]}`
+  return msg.split('\n')[0].slice(0, 140)
+}
+
+/** Each one DESCRIBES the write; the caller shows it and only then runs it. */
 interface PositionActions {
-  exercise: (p: Position, size: number) => Promise<void>
-  close: (p: Position, size: number) => Promise<void>
-  settle: (p: Position) => Promise<void>
-  redeem: (p: Position) => Promise<void>
-  claim: (p: Position) => Promise<void>
+  exercise: (p: Position) => PendingAction
+  close: (p: Position) => PendingAction
+  /** `oracle.recordSettlement` — the step before `settle` is even possible. */
+  record: (p: Position) => PendingAction
+  settle: (p: Position) => PendingAction
+  redeem: (p: Position) => PendingAction
+  claim: (p: Position) => PendingAction
 }
 
 type WriteAsync = (args: {
@@ -886,6 +1156,7 @@ function usePositionActions(
   write: WriteAsync,
   setToast: (s: string) => void,
   refetch: () => void,
+  bal: Balances,
 ): PositionActions {
   const app = deployment?.weekendOptions as `0x${string}` | undefined
 
@@ -899,44 +1170,141 @@ function usePositionActions(
   }
 
   return {
-    // CALL: approve USDC = ceil(amount*strike/1e18); PUT: approve NVDAx = amount.
-    async exercise(p, size) {
-      if (!app || !publicClient || !deployment) return
-      const amount = parseUnits(String(size), UNDERLYING_DECIMALS)
-      if (p.kind === KIND.CALL) {
-        const strike6 = BigInt(Math.round(p.strike * 10 ** QUOTE_DECIMALS))
-        const pay = (amount * strike6 + 10n ** 18n - 1n) / 10n ** 18n
-        setToast('Approving USDC for exercise…')
-        const a = await write({
-          address: deployment.usdc as `0x${string}`,
-          abi: erc20Abi,
-          functionName: 'approve',
-          args: [app, pay],
-        })
-        await publicClient.waitForTransactionReceipt({ hash: a })
-      } else {
-        setToast('Approving NVDAx for exercise…')
-        const a = await write({
-          address: deployment.nvdax as `0x${string}`,
-          abi: erc20Abi,
-          functionName: 'approve',
-          args: [app, amount],
-        })
-        await publicClient.waitForTransactionReceipt({ hash: a })
+    /* Exercise: pay the strike, take the stock (CALL) — or deliver the stock and
+     * take the strike (PUT). Reads NO oracle, which is the point of the product.
+     *
+     * This is the action that ambushed people: on a 7.57-option CALL at strike 100
+     * it opens a 756.97 USDC approval, and nothing said so. Now the cost is stated
+     * and the balance checked before a wallet is ever touched. */
+    exercise(p) {
+      const amount = p.balance
+      const isCall = p.kind === KIND.CALL
+      const pay = (amount * p.strikeRaw + 10n ** 18n - 1n) / 10n ** 18n // rounds up, as the contract does
+      const short = isCall ? bal.usdc < pay : bal.nvdax < amount
+      return {
+        title: `Exercise ${ufmt(amount).toFixed(4)} ${isCall ? 'CALL' : 'PUT'} #${p.seriesId}`,
+        summary: isCall
+          ? `Pay the strike in USDC and take the NVDAx. Worth doing only while NVDAx trades ABOVE ${p.strike.toFixed(2)} — below that you would be overpaying, and letting it expire costs nothing.`
+          : `Deliver the NVDAx and take the strike in USDC. Worth doing while NVDAx trades BELOW ${p.strike.toFixed(2)}.`,
+        rows: isCall
+          ? [
+              ['You pay', fmtQ(pay)],
+              ['You receive', fmtU(amount)],
+              ['Your USDC', fmtQ(bal.usdc)],
+              ['Strike', `${p.strike.toFixed(2)} USDC per NVDAx`],
+            ]
+          : [
+              ['You deliver', fmtU(amount)],
+              ['You receive', fmtQ(pay)],
+              ['Your NVDAx', fmtU(bal.nvdax)],
+            ],
+        blocked: short
+          ? isCall
+            ? `Not enough USDC — this needs ${fmtQ(pay)} and you hold ${fmtQ(bal.usdc)}.`
+            : `Not enough NVDAx — this needs ${fmtU(amount)} and you hold ${fmtU(bal.nvdax)}.`
+          : undefined,
+        steps: 2,
+        async run() {
+          if (!app || !publicClient || !deployment) return
+          setToast(`Approving ${isCall ? 'USDC' : 'NVDAx'}…`)
+          const a = await write({
+            address: (isCall ? deployment.usdc : deployment.nvdax) as `0x${string}`,
+            abi: erc20Abi,
+            functionName: 'approve',
+            args: [app, isCall ? pay : amount],
+          })
+          await publicClient.waitForTransactionReceipt({ hash: a })
+          await send('exercise', [BigInt(p.seriesId), amount], 'Exercising…', 'Exercised')
+        },
       }
-      await send('exercise', [BigInt(p.seriesId), amount], 'Exercising…', 'Exercised')
     },
-    async close(p, size) {
-      await send('close', [BigInt(p.seriesId), parseUnits(String(size), UNDERLYING_DECIMALS)], 'Closing…', 'Closed')
+
+    /* Close: a WRITER burns their own options to unlock cover early. Barred the
+     * moment anyone exercises the series (`CloseAfterExercise`), so say that here
+     * rather than letting the revert explain it. */
+    close(p) {
+      return {
+        title: `Close ${ufmt(p.written).toFixed(4)} written #${p.seriesId}`,
+        summary:
+          'Burn options you wrote and release your share of the collateral pool early. This is barred for the rest of the series the moment anyone exercises it.',
+        rows: [
+          ['You burn', `${ufmt(p.written).toFixed(4)} options`],
+          ['You unlock', 'your pro-rata share of the pool'],
+        ],
+        steps: 1,
+        async run() {
+          await send('close', [BigInt(p.seriesId), p.written], 'Closing…', 'Closed')
+        },
+      }
     },
-    async settle(p) {
-      await send('settle', [BigInt(p.seriesId)], 'Settling…', 'Settled')
+
+    /* Record the settlement price. PERMISSIONLESS and one-shot, and `settle` reverts
+     * `OracleNotReady` until it has happened — without this step the demo dead-ends
+     * at expiry on a Settle button that can only fail. */
+    record(p) {
+      return {
+        title: `Record the settlement price for #${p.seriesId}`,
+        summary:
+          'Reads the Uniswap v4 pool once and freezes that price for this expiry. Anyone can call it, it can only be done once, and nothing settles until it has been.',
+        rows: [['Series', `#${p.seriesId}`], ['Expired', new Date(p.expiry * 1000).toLocaleString()]],
+        steps: 1,
+        async run() {
+          if (!deployment || !publicClient) return
+          setToast('Recording the settlement price…')
+          const hash = await write({
+            address: deployment.oracle as `0x${string}`,
+            abi: oracleAbi,
+            functionName: 'recordSettlement',
+            args: [deployment.nvdax as `0x${string}`, BigInt(p.expiry)],
+          })
+          await publicClient.waitForTransactionReceipt({ hash })
+          refetch()
+          setToast('Settlement price recorded')
+        },
+      }
     },
-    async redeem(p) {
-      await send('redeem', [BigInt(p.seriesId), p.balance], 'Redeeming…', 'Redeemed')
+
+    settle(p) {
+      return {
+        title: `Settle series #${p.seriesId}`,
+        summary:
+          'Freezes how the collateral pool splits between holders and writers, using the recorded price. Permissionless, once per series — after this everyone just collects.',
+        rows: [['Series', `#${p.seriesId}`]],
+        steps: 1,
+        async run() {
+          await send('settle', [BigInt(p.seriesId)], 'Settling…', 'Settled')
+        },
+      }
     },
-    async claim(p) {
-      await send('claim', [BigInt(p.seriesId)], 'Claiming…', 'Claimed')
+
+    redeem(p) {
+      return {
+        title: `Redeem ${ufmt(p.balance).toFixed(4)} #${p.seriesId}`,
+        summary:
+          'Burn your expired options and take your pro-rata share of the holder side of the pool. Out of the money, that share is zero and the options simply expire.',
+        rows: [
+          ['You burn', `${ufmt(p.balance).toFixed(4)} options`],
+          ['Settlement price', p.settled ? `${p.settlePrice.toFixed(2)} USDC` : 'not settled yet'],
+          ['Strike', `${p.strike.toFixed(2)} USDC`],
+        ],
+        steps: 1,
+        async run() {
+          await send('redeem', [BigInt(p.seriesId), p.balance], 'Redeeming…', 'Redeemed')
+        },
+      }
+    },
+
+    claim(p) {
+      return {
+        title: `Claim your written position in #${p.seriesId}`,
+        summary:
+          'Take back the collateral left on the writer side after holders are paid. One shot — it pays the whole position and a second call does nothing.',
+        rows: [['You wrote', `${ufmt(p.written).toFixed(4)} options`]],
+        steps: 1,
+        async run() {
+          await send('claim', [BigInt(p.seriesId)], 'Claiming…', 'Claimed')
+        },
+      }
     },
   }
 }
@@ -951,6 +1319,7 @@ function PositionsTable({
   error,
   actions,
   pending,
+  onReview,
 }: {
   deployment: Deployment | null
   deployed: boolean
@@ -961,6 +1330,7 @@ function PositionsTable({
   error: string | null
   actions: PositionActions
   pending: boolean
+  onReview: (a: PendingAction) => void
 }) {
   void deployment
   void kinds
@@ -1010,7 +1380,7 @@ function PositionsTable({
             header: '',
             numeric: true,
             render: (p: Position) => (
-              <PositionButtons p={p} live={live} actions={actions} pending={pending} />
+              <PositionButtons p={p} live={live} actions={actions} pending={pending} onReview={onReview} />
             ),
           },
         ]}
@@ -1028,11 +1398,13 @@ function PositionButtons({
   live,
   actions,
   pending,
+  onReview,
 }: {
   p: Position
   live: boolean
   actions: PositionActions
   pending: boolean
+  onReview: (a: PendingAction) => void
 }) {
   const left = useSecondsLeft(p.expiry)
   const expired = left <= 0
@@ -1045,12 +1417,12 @@ function PositionButtons({
     return (
       <div className="vx-row" style={{ justifyContent: 'flex-end', gap: 6 }}>
         {holder && (
-          <Button size="sm" variant="primary" loading={pending} onClick={() => actions.exercise(p, ufmt(p.balance))}>
+          <Button size="sm" variant="primary" loading={pending} onClick={() => onReview(actions.exercise(p))}>
             Exercise
           </Button>
         )}
         {writer && (
-          <Button size="sm" variant="secondary" loading={pending} onClick={() => actions.close(p, ufmt(p.written))}>
+          <Button size="sm" variant="secondary" loading={pending} onClick={() => onReview(actions.close(p))}>
             Close
           </Button>
         )}
@@ -1059,20 +1431,34 @@ function PositionButtons({
     )
   }
 
+  // Post-expiry the order is fixed and each step is permissionless: record the price
+  // on the oracle, settle the series once, then redeem (holder) / claim (writer).
+  // Offering Settle before the price is recorded is offering a button that reverts.
   return (
     <div className="vx-row" style={{ justifyContent: 'flex-end', gap: 6 }}>
-      {!p.settled && (
-        <Button size="sm" variant="primary" loading={pending} onClick={() => actions.settle(p)}>
+      {!p.settled && !p.priceRecorded && (
+        <Button
+          size="sm"
+          variant="primary"
+          loading={pending}
+          title="oracle.recordSettlement — permissionless, one-shot. settle() reverts until this lands."
+          onClick={() => onReview(actions.record(p))}
+        >
+          Record price
+        </Button>
+      )}
+      {!p.settled && p.priceRecorded && (
+        <Button size="sm" variant="primary" loading={pending} onClick={() => onReview(actions.settle(p))}>
           Settle
         </Button>
       )}
       {p.settled && holder && (
-        <Button size="sm" variant="primary" loading={pending} onClick={() => actions.redeem(p)}>
+        <Button size="sm" variant="primary" loading={pending} onClick={() => onReview(actions.redeem(p))}>
           Redeem
         </Button>
       )}
       {p.settled && writer && (
-        <Button size="sm" variant="secondary" loading={pending} onClick={() => actions.claim(p)}>
+        <Button size="sm" variant="secondary" loading={pending} onClick={() => onReview(actions.claim(p))}>
           Claim
         </Button>
       )}
@@ -1089,29 +1475,62 @@ function HistoryTable({ rows }: { rows: HistoryRow[] }) {
         <EmptyState
           icon={<Inbox size={18} />}
           title="No history yet"
-          description="Buys (OptionWritten) and exercises land here."
+          description="Fills through the desk, exercises and redemptions land here."
         />
       }
       columns={[
         {
           key: 'kind',
           header: 'Event',
-          render: (r: HistoryRow) => (
-            <Badge tone={r.kind === 'written' ? 'green' : 'violet'}>
-              {r.kind === 'written' ? 'Bought' : 'Exercised'}
-            </Badge>
-          ),
+          render: (r: HistoryRow) => <Badge tone={HISTORY_TONE[r.kind]}>{HISTORY_LABEL[r.kind]}</Badge>,
         },
         { key: 'series', header: 'Series', numeric: true, render: (r: HistoryRow) => `#${r.seriesId}` },
-        { key: 'amt', header: 'Options', numeric: true, render: (r: HistoryRow) => ufmt(r.amount).toFixed(2) },
+        { key: 'amt', header: 'Options', numeric: true, render: (r: HistoryRow) => ufmt(r.amount).toFixed(4) },
         {
-          key: 'prem',
-          header: 'Premium',
+          key: 'usdc',
+          header: 'USDC',
           numeric: true,
-          render: (r: HistoryRow) => (r.kind === 'written' ? qfmt(r.premium).toFixed(QUOTE_DECIMALS) : '—'),
+          render: (r: HistoryRow) =>
+            r.quoteAmount === 0n ? '—' : qfmt(r.quoteAmount).toFixed(QUOTE_DECIMALS),
         },
         { key: 'blk', header: 'Block', numeric: true, render: (r: HistoryRow) => String(r.blockNumber) },
+        {
+          key: 'tx',
+          header: 'Receipt',
+          numeric: true,
+          // The log scan already carries the hash; it was just never shown. A
+          // fill nobody can open on an explorer is a claim, not a receipt.
+          render: (r: HistoryRow) =>
+            r.txHash && r.txHash !== '0x' ? (
+              <a
+                className="vx-tx"
+                href={`${BASESCAN}/tx/${r.txHash}`}
+                target="_blank"
+                rel="noreferrer"
+                title={r.txHash}
+              >
+                {r.txHash.slice(0, 10)}…{r.txHash.slice(-4)}
+                <ExternalLink size={12} />
+              </a>
+            ) : (
+              '—'
+            ),
+        },
       ]}
     />
   )
+}
+
+const HISTORY_LABEL: Record<HistoryRow['kind'], string> = {
+  bought: 'Bought',
+  sold: 'Sold',
+  exercised: 'Exercised',
+  redeemed: 'Redeemed',
+}
+
+const HISTORY_TONE: Record<HistoryRow['kind'], 'green' | 'red' | 'violet' | 'slate'> = {
+  bought: 'green',
+  sold: 'red',
+  exercised: 'violet',
+  redeemed: 'slate',
 }

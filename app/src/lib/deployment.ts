@@ -68,6 +68,26 @@ export interface Deployment {
   maker: string
   /** Block the contracts were deployed at — the history log scan starts here. */
   deployBlock?: number
+  /**
+   * The desk's OWN core-protocol strategy hash — `hashStrategy` of the tuple the
+   * desk ships to `weekendOptions` (not to the router) and buys from itself with.
+   *
+   * This is NOT derivable from the fields below. The own strategy carries
+   * `volWad = VOL_SELF`, `minPremiumBps = 0`, `maxSecondsToExpiry = type(uint64).max`
+   * and `salt = 0` (DeployDemo.s.sol `_ownStrategy`), none of which are written to
+   * this JSON — only the finished hash is. Reconstructing a tuple from the ASK
+   * parameters instead produces a hash nothing was ever shipped under, and every
+   * capacity read against it returns 0. Use this hash.
+   */
+  ownStrategyHash: string
+
+  /**
+   * Every resting quote the book should show. Written by `contracts/script/SeedBook.s.sol`
+   * and verified against Aqua by `scripts/seed-quotes.ts`. When present it REPLACES the
+   * three legacy per-key quotes below, which could only ever describe the deploy's own
+   * three ships and cannot grow with the book.
+   */
+  quotes?: MakerQuote[]
 
   // --- series 0 (weekend, long-dated ask) ---
   seriesId: number
@@ -129,6 +149,11 @@ export function canTrade(d: Deployment | null): d is Deployment {
  * later (new makers), but these three are the ones the deploy shipped.
  */
 export function makerQuotes(d: Deployment): MakerQuote[] {
+  // The seeded ladder is authoritative when it is there.
+  if (Array.isArray(d.quotes) && d.quotes.length > 0) {
+    return d.quotes.filter((q) => isNonEmptyAddr(q.optionToken))
+  }
+
   const quotes: MakerQuote[] = [
     {
       key: `ask-${d.seriesId}`,

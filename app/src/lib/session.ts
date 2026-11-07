@@ -20,7 +20,7 @@ export function marketClosed(now: Date = new Date()): boolean {
   return minutes < OPEN_MIN || minutes >= CLOSE_MIN
 }
 
-/** Vol multiplier suggested while the market is closed (Weekend Options uses 1.3). */
+/** Vol multiplier suggested while the market is closed (GAP uses 1.3). */
 export const CLOSED_VOL_MULTIPLIER = 1.3
 
 /** The vol we suggest to a maker right now, given their baseline. */

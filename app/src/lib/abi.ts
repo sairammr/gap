@@ -246,6 +246,17 @@ export const weekendOptionsAbi = [
       { name: 'holderCash', type: 'uint256', indexed: false },
     ],
   },
+  {
+    type: 'event',
+    name: 'Redeemed',
+    inputs: [
+      { name: 'seriesId', type: 'uint256', indexed: true },
+      { name: 'holder', type: 'address', indexed: true },
+      { name: 'amount', type: 'uint256', indexed: false },
+      { name: 'outU', type: 'uint256', indexed: false },
+      { name: 'outC', type: 'uint256', indexed: false },
+    ],
+  },
 ] as const
 
 // The AquaSwapVMRouter surface we fill through. `Order` is field-identical to
@@ -258,6 +269,12 @@ const orderComponents = [
 ] as const
 
 const orderArg = { name: 'order', type: 'tuple', components: orderComponents } as const
+
+/** The same tuple as an `encodeAbiParameters` param. `Aqua.ship` takes the strategy as
+ *  raw bytes, and `strategyHash = keccak256(those bytes) = router.hash(order)` — so the
+ *  encoding has to be this exact tuple or the shipped balances key a hash no fill can
+ *  reach. */
+export const orderAbiParam = orderArg
 
 export const routerAbi = [
   {
@@ -441,6 +458,164 @@ export const aquaAbi = [
       { name: 'app', type: 'address', indexed: false },
       { name: 'strategyHash', type: 'bytes32', indexed: false },
       { name: 'strategy', type: 'bytes', indexed: false },
+    ],
+  },
+] as const
+
+// ----------------------------------------------------------------------------
+// WeekendDesk — the maker. On the Aqua path the TAKER never appears in
+// `WeekendOptions.OptionWritten`: the desk mints to ITSELF inside preTransferOut
+// (`buyOption(..., to = address(this), ...)`) and `AQUA.pull` then moves the fresh
+// tokens out. So `OptionWritten.to` is always the desk, and the only events that
+// name a taker are the desk's own. Filtering OptionWritten by `to: wallet` returns
+// nothing for a buyer — these two are the history.
+export const deskAbi = [
+  {
+    type: 'function',
+    name: 'maxShort',
+    stateMutability: 'view',
+    inputs: [{ name: 'seriesId', type: 'uint256' }],
+    outputs: [{ name: '', type: 'uint256' }],
+  },
+  {
+    type: 'function',
+    name: 'ownStrategyHash',
+    stateMutability: 'view',
+    inputs: [],
+    outputs: [{ name: '', type: 'bytes32' }],
+  },
+  {
+    type: 'function',
+    name: 'active',
+    stateMutability: 'view',
+    inputs: [],
+    outputs: [{ name: '', type: 'bool' }],
+  },
+  {
+    type: 'function',
+    name: 'owner',
+    stateMutability: 'view',
+    inputs: [],
+    outputs: [{ name: '', type: 'address' }],
+  },
+  {
+    type: 'function',
+    name: 'ownStrategy',
+    stateMutability: 'view',
+    inputs: [],
+    outputs: [
+      {
+        name: '',
+        type: 'tuple',
+        components: [
+          { name: 'app', type: 'address' },
+          { name: 'maker', type: 'address' },
+          { name: 'underlying', type: 'address' },
+          { name: 'quote', type: 'address' },
+          { name: 'volWad', type: 'uint256' },
+          { name: 'minPremiumBps', type: 'uint16' },
+          { name: 'maxSecondsToExpiry', type: 'uint64' },
+          { name: 'salt', type: 'bytes32' },
+        ],
+      },
+    ],
+  },
+  // Owner-only. The desk forwards to `AQUA.ship` so that `msg.sender` is the DESK —
+  // which is what `order.maker` is, and what `safeBalances` looks the balance up by.
+  // This is why a browser CAN ship a quote and `script/ShipAsk.s.sol` cannot: the
+  // script's EOA is not the maker, the desk's owner calling through the desk is.
+  {
+    type: 'function',
+    name: 'ship',
+    stateMutability: 'nonpayable',
+    inputs: [
+      { name: 'app', type: 'address' },
+      { name: 'strategyBytes', type: 'bytes' },
+      { name: 'tokens', type: 'address[]' },
+      { name: 'amounts', type: 'uint256[]' },
+    ],
+    outputs: [{ name: 'strategyHash', type: 'bytes32' }],
+  },
+  {
+    type: 'function',
+    name: 'approveAqua',
+    stateMutability: 'nonpayable',
+    inputs: [
+      { name: 'token', type: 'address' },
+      { name: 'amount', type: 'uint256' },
+    ],
+    outputs: [],
+  },
+  {
+    type: 'event',
+    name: 'Sold',
+    inputs: [
+      { name: 'seriesId', type: 'uint256', indexed: true },
+      { name: 'taker', type: 'address', indexed: true },
+      { name: 'amountOut', type: 'uint256', indexed: false },
+      { name: 'amountIn', type: 'uint256', indexed: false },
+      { name: 'minted', type: 'uint256', indexed: false },
+    ],
+  },
+  {
+    type: 'event',
+    name: 'BoughtBack',
+    inputs: [
+      { name: 'seriesId', type: 'uint256', indexed: true },
+      { name: 'taker', type: 'address', indexed: true },
+      { name: 'amountIn', type: 'uint256', indexed: false },
+      { name: 'amountOut', type: 'uint256', indexed: false },
+      { name: 'closed', type: 'uint256', indexed: false },
+    ],
+  },
+] as const
+
+// ----------------------------------------------------------------------------
+// V4SpotOracle, behind IPriceOracle. `recordSettlement` is PERMISSIONLESS and
+// one-shot: nothing settles until someone calls it at or after expiry, which is
+// why the Positions tab offers it as its own step before `settle`.
+export const oracleAbi = [
+  {
+    type: 'function',
+    name: 'recordSettlement',
+    stateMutability: 'nonpayable',
+    inputs: [
+      { name: 'asset', type: 'address' },
+      { name: 'expiry', type: 'uint64' },
+    ],
+    outputs: [],
+  },
+  {
+    type: 'function',
+    name: 'recorded',
+    stateMutability: 'view',
+    inputs: [
+      { name: 'asset', type: 'address' },
+      { name: 'expiry', type: 'uint64' },
+    ],
+    outputs: [{ name: '', type: 'bool' }],
+  },
+  {
+    type: 'function',
+    name: 'settlementPrice',
+    stateMutability: 'view',
+    inputs: [
+      { name: 'asset', type: 'address' },
+      { name: 'expiry', type: 'uint64' },
+    ],
+    outputs: [
+      { name: 'price', type: 'uint256' },
+      { name: 'ok', type: 'bool' },
+    ],
+  },
+  {
+    type: 'function',
+    name: 'spot',
+    stateMutability: 'view',
+    inputs: [{ name: 'asset', type: 'address' }],
+    outputs: [
+      { name: 'price', type: 'uint256' },
+      { name: 'updatedAt', type: 'uint256' },
     ],
   },
 ] as const

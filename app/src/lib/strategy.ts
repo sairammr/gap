@@ -7,6 +7,9 @@ import type { Deployment, MakerQuote } from './deployment'
 export const UNDERLYING_DECIMALS = 18
 export const QUOTE_DECIMALS = 6
 
+/** `type(uint64).max` — what `DeployDemo._ownStrategy` ships. */
+export const MAX_SECONDS_TO_EXPIRY = (2n ** 64n - 1n) as bigint
+
 export interface StrategyTuple {
   app: `0x${string}`
   maker: `0x${string}`
@@ -19,14 +22,20 @@ export interface StrategyTuple {
 }
 
 /**
- * Build the on-chain Strategy tuple for a shipped maker quote.
+ * A tuple for the `quotePremium` READ, and nothing else.
  *
- * `maxSecondsToExpiry` is derived from the quote's series deadline: the shipped order
- * was calibrated for that tenor, and `_buyOption` reverts `TenorTooLong` if a series'
- * remaining life exceeds it. We use a generous bound (the order deadline) so a fill
- * near expiry still clears; the maker's real protection is the vol they shipped.
+ * `WeekendOptions.quotePremium(s, seriesId, amount)` reads exactly ONE field off
+ * `s` — `volWad` — and derives everything else from the series. So this carries the
+ * quote's vol, which is the number the taker is actually being priced at, and fills
+ * the rest to match the desk's own shipped strategy so the tuple is at least a
+ * coherent object rather than a fiction.
+ *
+ * It is deliberately NOT used for anything that hashes the tuple. `makerCapacity`
+ * does (`hashStrategy(s)` keys the Aqua ledger), and no tuple reconstructable from
+ * this JSON hashes to something that was shipped — see `Deployment.ownStrategyHash`
+ * and `lib/capacity.ts`, which reads the ledger by its real hash instead.
  */
-export function buildStrategy(d: Deployment, q: MakerQuote): StrategyTuple {
+export function pricingStrategy(d: Deployment, q: MakerQuote): StrategyTuple {
   return {
     app: d.weekendOptions as `0x${string}`,
     maker: q.maker as `0x${string}`,
@@ -34,7 +43,7 @@ export function buildStrategy(d: Deployment, q: MakerQuote): StrategyTuple {
     quote: d.usdc as `0x${string}`,
     volWad: BigInt(q.volWad),
     minPremiumBps: q.minPremiumBps,
-    maxSecondsToExpiry: BigInt(q.deadline),
+    maxSecondsToExpiry: MAX_SECONDS_TO_EXPIRY,
     salt: q.salt as `0x${string}`,
   }
 }

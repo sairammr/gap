@@ -1,4 +1,4 @@
-// SwapVM order encoder for the Weekend Options Aqua path, ported from sdk/orders.ts
+// SwapVM order encoder for the GAP Aqua path, ported from sdk/orders.ts
 // (which is byte-reconciled against contracts/test/helpers/OrderLib.sol) to run in the
 // browser with viem types.
 //
@@ -151,20 +151,36 @@ const F_USE_TRANSFER_FROM_AND_AQUA_PUSH = 0x0040
 const F_IS_A_TO_B = 0x0080
 
 /**
- * takerTraits = abi.encodePacked(10×uint16(32), uint16 flags, uint256 minOut).
+ * takerTraits = abi.encodePacked(10×uint16(32), uint16 flags, uint256 threshold).
  *
  * The ten 16-bit slice indexes are all 32 (the threshold word is the only slice).
  * `isAToB` is derived from the sorted pair — which token is "A" depends on the deployed
  * addresses — exactly as `Lifecycle._tt` does it. `tokenIn` is USDC for a buy, the
  * option token for a sell.
+ *
+ * `exactIn` picks which amount the taker is naming, and that flips what `threshold`
+ * means — `minOut` when exact-in, `maxIn` when exact-out. Getting the pairing wrong
+ * does not revert; it silently constrains the wrong leg.
+ *
+ * A threshold of 0 means NO THRESHOLD AT ALL, not "accept zero out". On an exact-out
+ * fill a literal 0 maxIn would reject every fill, so pass a real ceiling there.
  */
-export function takerTraits(usdc: string, optionToken: string, tokenIn: string, minOut: bigint): Hex {
+export function takerTraits(
+  usdc: string,
+  optionToken: string,
+  tokenIn: string,
+  threshold: bigint,
+  exactIn = true,
+): Hex {
   const u = usdc.toLowerCase()
   const o = optionToken.toLowerCase()
   const tokenA = u < o ? u : o
   const isAToB = tokenIn.toLowerCase() === tokenA
-  const flags = F_IS_EXACT_IN | F_USE_TRANSFER_FROM_AND_AQUA_PUSH | (isAToB ? F_IS_A_TO_B : 0)
+  const flags =
+    (exactIn ? F_IS_EXACT_IN : 0) |
+    F_USE_TRANSFER_FROM_AND_AQUA_PUSH |
+    (isAToB ? F_IS_A_TO_B : 0)
 
   const idx = uint('idx', 32, 2).repeat(10)
-  return ('0x' + idx + uint('flags', flags, 2) + uint('minOut', minOut, 32)) as Hex
+  return ('0x' + idx + uint('flags', flags, 2) + uint('threshold', threshold, 32)) as Hex
 }
