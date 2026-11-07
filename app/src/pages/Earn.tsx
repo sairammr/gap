@@ -5,39 +5,40 @@
    does not move a single token. It writes an allowance-like entry on Aqua's books
    against the MAKER's own wallet, keyed by (maker, router, strategyHash, token).
    The ERC-20 only moves at fill time, when `AQUA.pull` does a real transferFrom.
-   So the two numbers this view puts side by side — what Aqua thinks is committed,
-   and what the maker wallet actually holds — can disagree, and when they do, the
-   next fill reverts for whoever tries it.
 
-   In WeekendOptions the maker is the WeekendDesk contract (it implements the Aqua
-   hooks that mint option tokens inside preTransferOut). An EOA cannot usefully
-   ship an ASK — it would have to hold the per-series option token up front — so
-   this page is the desk's monitor, not a "ship as yourself" form. Each shipped
-   quote (ask series 0, ask series 1, bid series 1) is read straight from Aqua:
-   committed = rawBalances(desk, router, strategyHash, backingToken), and wallet =
-   backingToken.balanceOf(desk). The ASK is backed by the option token (the cap the
-   desk can write); the BID is backed by USDC (the budget the desk can spend buying
-   options back).
+   WHAT "BACKED" MEANS IS DIFFERENT ON EACH SIDE, and getting that wrong is how an
+   earlier version of this page painted two red alarms over a perfectly healthy desk.
 
-   Contract surface: AQUA.rawBalances, router.hash, OptionToken/USDC.balanceOf,
-   weekendOptions.hashStrategy. All reads — the desk ships from script/ShipAsk and
-   ShipBid, by design.
+     BID — the desk owes USDC. The backing is literal: it must HOLD the quote token,
+       and `committed > balanceOf(desk)` genuinely means the next large fill reverts
+       inside `pull`.
+
+     ASK — the desk owes OPTION TOKENS, and it holds ZERO of them by design. There is
+       no inventory to hold: `WeekendDesk._mintShortfall` mints the exact shortfall
+       inside `preTransferOut`, and `AQUA.pull` then moves tokens that did not exist
+       one call earlier. `balanceOf(desk) == 0` is the NORMAL state, not a fault.
+       What actually backs an ask is the COVER behind the mint — the desk's own
+       core-protocol strategy — capped by `maxShort`. So this page compares the
+       shipped option cap against what can really be written, which is what
+       `lib/capacity.ts` computes for the ticket.
+
+   Contract surface: AQUA.rawBalances, router.hash, WeekendOptions.getSeries /
+   written, WeekendDesk.maxShort, ERC-20 balanceOf. All reads — the desk ships from
+   script/ShipAsk and ShipBid, by design.
    ========================================================================= */
 
 import { useEffect, useMemo, useState } from 'react'
 import { usePublicClient } from 'wagmi'
 import { formatUnits } from 'viem'
-import { Anchor, ArrowDownRight, ArrowUpRight, Wallet } from 'lucide-react'
-import { aquaAbi, erc20Abi, optionTokenAbi, routerAbi } from '../lib/abi'
+import { Anchor, ArrowDownRight, ArrowUpRight, Inbox, Wallet } from 'lucide-react'
+import { optionTokenAbi, routerAbi, weekendOptionsAbi } from '../lib/abi'
 import { volPct, QUOTE_DECIMALS, UNDERLYING_DECIMALS } from '../lib/strategy'
-import {
-  makerQuotes,
-  type Deployment,
-  type MakerQuote,
-} from '../lib/deployment'
+import { readCapacity, type Capacity } from '../lib/capacity'
+import { KIND, type OptionKind } from '../lib/pricing'
+import { makerQuotes, type Deployment, type MakerQuote } from '../lib/deployment'
 import { orderForQuote } from '../lib/orders'
 import { Alert, Badge, Card, EmptyState, KeyValue, Panel, StatCard } from '../ui'
-import { Inbox } from 'lucide-react'
+import { EarnShip } from './EarnShip'
 
 export interface EarnProps {
   deployment: Deployment | null
@@ -48,20 +49,18 @@ export interface EarnProps {
 /** One shipped quote's Aqua backing, read live. */
 interface QuoteBooks {
   quote: MakerQuote
-  /** Which token backs this side: ASK = option token, BID = USDC. */
-  backingToken: `0x${string}`
-  backingSymbol: string
-  decimals: number
-  /** AQUA.rawBalances — what the router may pull against this strategy. */
-  committed: number
-  /** The desk wallet's real balance of the backing token. */
-  wallet: number
+  kind: OptionKind
+  cap: Capacity
+  /** ERC-20 symbol of whatever the side sells (option token / USDC). */
+  symbol: string
   /** Does the rebuilt SwapVM order still hash to the shipped strategy? */
   hashOk: boolean
 }
 
+const u = (v: bigint) => Number(formatUnits(v, UNDERLYING_DECIMALS))
+const q6 = (v: bigint) => Number(formatUnits(v, QUOTE_DECIMALS))
+
 export function Earn({ deployment, deployed, onToast }: EarnProps) {
-  void onToast
   const publicClient = usePublicClient()
   const quotes = useMemo(() => (deployment ? makerQuotes(deployment) : []), [deployment])
 
@@ -78,35 +77,27 @@ export function Earn({ deployment, deployed, onToast }: EarnProps) {
     }
     let cancelled = false
     setLoading(true)
-    const desk = deployment.desk as `0x${string}`
     const router = deployment.swapVmRouter as `0x${string}`
 
     void (async () => {
       try {
         const rows = await Promise.all(
           quotes.map(async (q): Promise<QuoteBooks> => {
-            // ASK backing is the option token (the writable cap); BID backing is USDC.
             const isAsk = q.side === 'ask'
-            const backingToken = (isAsk ? q.optionToken : deployment.usdc) as `0x${string}`
-            const decimals = isAsk ? UNDERLYING_DECIMALS : QUOTE_DECIMALS
+            const ser = (await publicClient.readContract({
+              address: deployment.weekendOptions as `0x${string}`,
+              abi: weekendOptionsAbi,
+              functionName: 'getSeries',
+              args: [BigInt(q.seriesId)],
+            })) as { kind: number; strike: bigint }
+            const kind = (ser.kind === 1 ? KIND.PUT : KIND.CALL) as OptionKind
 
             // Gate the shipped quote exactly as the Trade side does: rebuild the
             // SwapVM order and confirm router.hash == the shipped strategyHash.
             const order = orderForQuote(deployment, q)
 
-            const [raw, wallet, onchainHash, symbol] = await Promise.all([
-              publicClient.readContract({
-                address: deployment.aqua as `0x${string}`,
-                abi: aquaAbi,
-                functionName: 'rawBalances',
-                args: [desk, router, q.strategyHash as `0x${string}`, backingToken],
-              }) as Promise<readonly [bigint, number]>,
-              publicClient.readContract({
-                address: backingToken,
-                abi: erc20Abi,
-                functionName: 'balanceOf',
-                args: [desk],
-              }) as Promise<bigint>,
+            const [cap, onchainHash, symbol] = await Promise.all([
+              readCapacity(publicClient, deployment, q, kind, ser.strike),
               publicClient.readContract({
                 address: router,
                 abi: routerAbi,
@@ -115,7 +106,7 @@ export function Earn({ deployment, deployed, onToast }: EarnProps) {
               }) as Promise<`0x${string}`>,
               isAsk
                 ? (publicClient.readContract({
-                    address: backingToken,
+                    address: q.optionToken as `0x${string}`,
                     abi: optionTokenAbi,
                     functionName: 'symbol',
                   }) as Promise<string>)
@@ -124,11 +115,9 @@ export function Earn({ deployment, deployed, onToast }: EarnProps) {
 
             return {
               quote: q,
-              backingToken,
-              backingSymbol: symbol,
-              decimals,
-              committed: Number(formatUnits(raw[0], decimals)),
-              wallet: Number(formatUnits(wallet, decimals)),
+              kind,
+              cap,
+              symbol,
               hashOk: onchainHash.toLowerCase() === q.strategyHash.toLowerCase(),
             }
           }),
@@ -166,15 +155,17 @@ export function Earn({ deployment, deployed, onToast }: EarnProps) {
         >
           <div className="vx-col">
             <p style={{ margin: 0, font: 'var(--t-body-l)', color: 'var(--ink-soft)' }}>
-              Each shipped quote is a resting order backed by a real token sitting in the desk
-              wallet. <b>An ASK is backed by the option token</b> (the cap the desk can write);{' '}
-              <b>a BID is backed by USDC</b> (the budget it can spend buying options back). Nothing
-              is escrowed — the backing stays put until a buyer turns up.
+              Each shipped quote is a resting order with a <b>permanent</b> cap:{' '}
+              <code>Aqua.ship</code> is immutable, so the amount shipped is everything that order
+              can ever sell. Re-offering after it is exhausted needs a new salt, which hashes to a
+              different strategy.
             </p>
             <p style={{ margin: 0, font: 'var(--t-body-l)', color: 'var(--ink-soft)' }}>
-              If <em>committed</em> ever exceeds <em>wallet</em>, Aqua&rsquo;s books overstate what a
-              <code>pull</code> can actually draw, and the next fill large enough to need the missing
-              tokens reverts. This view is how you catch that before a taker does.
+              <b>An ASK is not backed by inventory.</b> The desk holds zero option tokens and mints
+              the exact shortfall inside <code>preTransferOut</code>, so what really backs it is the
+              cover behind that mint — NVDAx for a CALL, USDC for a PUT — bounded by the desk&rsquo;s
+              own <code>maxShort</code>. <b>A BID is backed literally</b>: the desk has to hold the
+              USDC it owes.
             </p>
           </div>
         </Panel>
@@ -183,6 +174,10 @@ export function Earn({ deployment, deployed, onToast }: EarnProps) {
           <Alert tone="error" title="Could not read the desk's Aqua books">
             <code>{err}</code>
           </Alert>
+        )}
+
+        {canRead && (
+          <EarnShip deployment={deployment} deployed={deployed} onToast={onToast} />
         )}
 
         {!canRead && (
@@ -195,80 +190,117 @@ export function Earn({ deployment, deployed, onToast }: EarnProps) {
         {canRead && books.length === 0 && (
           <EmptyState
             icon={<Inbox size={18} />}
-            title={loading ? 'Reading the desk&rsquo;s books…' : 'No shipped quotes'}
+            title={loading ? 'Reading the desk’s books…' : 'No shipped quotes'}
             description="The desk ships asks and bids from script/ShipAsk and ShipBid."
           />
         )}
       </div>
 
       <div className="vx-col">
-        {books.map((b) => {
-          const underfunded = b.committed > 0 && b.wallet < b.committed
-          const isAsk = b.quote.side === 'ask'
-          return (
-            <Card key={b.quote.key}>
-              <div className="vx-panel__head">
-                <div className="vx-panel__title">
-                  {isAsk ? <ArrowUpRight size={16} /> : <ArrowDownRight size={16} />} Series{' '}
-                  {b.quote.seriesId} · {isAsk ? 'ASK' : 'BID'}
-                </div>
-                <Badge tone={isAsk ? 'green' : 'red'}>IV {volPct(b.quote.volWad)}%</Badge>
-              </div>
-              <div className="vx-panel__body vx-col">
-                <div className="vx-grid vx-grid--stats">
-                  <StatCard
-                    pair="Committed on Aqua"
-                    color="#7b61ff"
-                    value={b.committed.toFixed(2)}
-                    sub={`rawBalances · ${b.backingSymbol}`}
-                  />
-                  <StatCard
-                    pair="Desk wallet"
-                    color={underfunded ? '#ef4444' : '#22c55e'}
-                    value={b.wallet.toFixed(2)}
-                    sub={`${b.backingSymbol}.balanceOf(desk)`}
-                  />
-                </div>
-
-                {underfunded && (
-                  <Alert tone="error" title="Books overstate the wallet">
-                    Aqua says <b>{b.committed.toFixed(2)} {b.backingSymbol}</b> is committed, but the
-                    desk wallet holds <b>{b.wallet.toFixed(2)}</b>. The next fill that needs the
-                    missing backing reverts at <code>pull</code>.
-                  </Alert>
-                )}
-
-                {!underfunded && b.committed > 0 && (
-                  <Alert tone="success" title="Backing is real">
-                    Committed and held match — fills inside{' '}
-                    <b>{b.committed.toFixed(2)} {b.backingSymbol}</b> clear without reverting.
-                  </Alert>
-                )}
-
-                <KeyValue
-                  rows={[
-                    ['Strategy hash', <code key="h">{b.quote.strategyHash}</code>],
-                    ['Backing token', `${b.backingSymbol} (${isAsk ? 'option cap' : 'USDC budget'})`],
-                    ['Gate', b.hashOk ? 'router.hash matches shipped' : 'HASH MISMATCH'],
-                    ['Min premium', `${b.quote.minPremiumBps} bps floor`],
-                  ]}
-                />
-              </div>
-            </Card>
-          )
-        })}
+        {books.map((b) => (
+          <QuoteBooksCard key={b.quote.key} b={b} />
+        ))}
 
         {canRead && books.length > 0 && (
-          <Panel title="Why it's read-only" icon={<Wallet size={16} />}>
+          <Panel title="Who can be the maker" icon={<Wallet size={16} />}>
             <p style={{ margin: 0, font: 'var(--t-body-s)', color: 'var(--muted)' }}>
               The maker is the <code>WeekendDesk</code> contract — it implements the Aqua hooks that
-              mint option tokens mid-fill, which an EOA can&rsquo;t do. Shipping happens from{' '}
-              <code>script/ShipAsk.s.sol</code> / <code>ShipBid.s.sol</code> as the desk; this page
-              watches the result.
+              mint option tokens mid-fill, which an EOA can&rsquo;t do. But{' '}
+              <code>WeekendDesk.ship</code> is <code>onlyOwner</code> and forwards to{' '}
+              <code>AQUA.ship</code>, so the desk&rsquo;s owner can ship from a wallet, in the panel on the left.{' '}
+              <code>script/ShipAsk.s.sol</code> only prints calldata because the EOA running it is
+              not the desk.
             </p>
           </Panel>
         )}
       </div>
     </div>
+  )
+}
+
+function QuoteBooksCard({ b }: { b: QuoteBooks }) {
+  const cap = b.cap
+  const isAsk = cap.side === 'ask'
+  const isCall = b.kind === KIND.CALL
+  const coverSymbol = isCall ? 'NVDAx' : 'USDC'
+  const coverDp = isCall ? UNDERLYING_DECIMALS : QUOTE_DECIMALS
+
+  // An ask is underfunded when the cover cannot write the cap Aqua is advertising —
+  // NOT when the desk holds no option tokens, which is its permanent resting state.
+  const shipped = cap.side === 'ask' ? cap.ledgerOptions : cap.ledgerUsdc
+  const fillable = cap.side === 'ask' ? cap.options : cap.usdc
+  const short = fillable < shipped
+
+  return (
+    <Card>
+      <div className="vx-panel__head">
+        <div className="vx-panel__title">
+          {isAsk ? <ArrowUpRight size={16} /> : <ArrowDownRight size={16} />} Series{' '}
+          {b.quote.seriesId} · {isAsk ? 'ASK' : 'BID'}
+        </div>
+        <Badge tone={isAsk ? 'green' : 'red'}>IV {volPct(b.quote.volWad)}%</Badge>
+      </div>
+      <div className="vx-panel__body vx-col">
+        <div className="vx-grid vx-grid--stats">
+          <StatCard
+            pair="Shipped cap"
+            color="#7b61ff"
+            value={isAsk ? u(shipped).toFixed(2) : q6(shipped).toFixed(2)}
+            sub={isAsk ? `${b.symbol} · immutable` : 'USDC budget · immutable'}
+          />
+          <StatCard
+            pair="Can actually fill"
+            color={short ? '#f59e0b' : '#22c55e'}
+            value={isAsk ? u(fillable).toFixed(2) : q6(fillable).toFixed(2)}
+            sub={isAsk ? 'options, cover + maxShort bound' : 'USDC the desk really holds'}
+          />
+        </div>
+
+        {short && (
+          <Alert tone="warning" title="Cover binds before the shipped cap">
+            Aqua advertises <b>{isAsk ? u(shipped).toFixed(2) : q6(shipped).toFixed(2)}</b>, but only{' '}
+            <b>{isAsk ? u(fillable).toFixed(2) : q6(fillable).toFixed(2)}</b> can be filled
+            {isAsk ? ' against the cover and short cap the desk has left' : ' from the desk wallet'}.
+            Fills above that revert at <code>pull</code>.
+          </Alert>
+        )}
+
+        {!short && fillable > 0n && (
+          <Alert tone="success" title="Backing is real">
+            The full shipped amount can be filled — cover and caps clear it.
+          </Alert>
+        )}
+
+        <KeyValue
+          rows={
+            isAsk && b.cap.side === 'ask'
+              ? [
+                  ['Strategy hash', <code key="h">{b.quote.strategyHash}</code>],
+                  [
+                    'Cover committed',
+                    `${Number(formatUnits(b.cap.coverCommitted, coverDp)).toFixed(2)} ${coverSymbol}`,
+                  ],
+                  [
+                    'Cover in wallet',
+                    `${Number(formatUnits(b.cap.coverWallet, coverDp)).toFixed(2)} ${coverSymbol}`,
+                  ],
+                  ['Short cap headroom', `${u(b.cap.shortHeadroom).toFixed(2)} options`],
+                  ['Inventory held', `${u(b.cap.inventory).toFixed(2)} ${b.symbol} (minted just-in-time)`],
+                  ['Gate', b.hashOk ? 'router.hash matches shipped' : 'HASH MISMATCH'],
+                  ['Min premium', `${b.quote.minPremiumBps} bps floor`],
+                ]
+              : [
+                  ['Strategy hash', <code key="h">{b.quote.strategyHash}</code>],
+                  [
+                    'USDC in wallet',
+                    `${q6(b.cap.side === 'bid' ? b.cap.walletUsdc : 0n).toFixed(2)} USDC`,
+                  ],
+                  ['Gate', b.hashOk ? 'router.hash matches shipped' : 'HASH MISMATCH'],
+                  ['Min premium', `${b.quote.minPremiumBps} bps floor`],
+                ]
+          }
+        />
+      </div>
+    </Card>
   )
 }
