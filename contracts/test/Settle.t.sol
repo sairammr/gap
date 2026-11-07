@@ -439,9 +439,14 @@ contract SettleTest is Test {
     ///         toward zero gives `hC = supply*K/1e18`, capped by the `min` at `poolCash` --
     ///         again the whole writer pool, from the other side.
     ///      `_settle`'s oracle sequence is a faithful §10 port; the defect is in the oracle, not
-    ///      here. Known fix: port the source's `PythSettlementOracle` (implements the same
-    ///      `IPriceOracle`). If the oracle is ever replaced these tests change shape -- that is
-    ///      the point.
+    ///      here. If the oracle is ever replaced these tests change shape -- that is the point.
+    ///
+    ///      THE FIX NOW EXISTS, UNWIRED: `src/oracle/PythSettlementOracle.sol` implements the
+    ///      same `IPriceOracle` and closes both halves of this -- see
+    ///      `PythSettlementOracle.t.sol::test_CLOSES_EXPOSURE_oneAdversarialSampleIsDilutedNotDecisive`,
+    ///      which is this test's assertions inverted. These two tests stay, and stay passing,
+    ///      for as long as `V4SpotOracle` is what a deployment actually points at. Deleting
+    ///      them is the LAST step of that swap, not the first.
     function test_settle_KNOWN_EXPOSURE_manipulatedSettlementPriceZeroesHolders() public {
         RealOracleHarness memory h = _deployRealOracleHarness();
         uint64 realExpiry = uint64(block.timestamp + 7 days);

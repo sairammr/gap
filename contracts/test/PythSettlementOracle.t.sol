@@ -235,10 +235,14 @@ contract PythSettlementOracleTest is Test {
     }
 
     function test_constructor_refusesAWindowThatLosesToTheGraceFallback() public {
+        // Read BEFORE arming the cheatcode: `vm.expectRevert` binds to the next external call,
+        // and `SETTLEMENT_GRACE()` is one.
+        uint64 grace = uint64(app.SETTLEMENT_GRACE());
+
         // `>= SETTLEMENT_GRACE` means `_settle` falls through to a single `spot()` read before
         // the average is ever final — reintroducing the exposure this contract removes.
         vm.expectRevert(PythSettlementOracle.WindowTooLong.selector);
-        new PythSettlementOracle(IPyth(address(pyth)), app.SETTLEMENT_GRACE());
+        new PythSettlementOracle(IPyth(address(pyth)), grace);
 
         vm.expectRevert(PythSettlementOracle.WindowTooLong.selector);
         new PythSettlementOracle(IPyth(address(pyth)), 0);
