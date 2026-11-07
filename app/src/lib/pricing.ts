@@ -75,30 +75,20 @@ export function bsPut(spot: number, strike: number, secondsToExpiry: number, vol
 export type OptionKind = typeof CALL | typeof PUT
 
 /**
- * Premium of a capped gap option, quote-per-1-unit of underlying (NOT scaled by size).
- * Mirrors GapPricing.premium:
- *   capped call = call(K) - call(K + cap)
- *   capped put  = put(K)  - put(max(0, K - cap))
+ * Premium of a plain (uncapped) option, quote-per-1-unit of underlying (NOT scaled by
+ * size). Weekend options are vanilla calls/puts — WeekendOptions.quotePremium calls
+ * GapPricing.call/put directly with no cap. This is the UI estimate only; the binding
+ * number is the on-chain quotePremium read.
  */
-export function cappedPremiumPerUnit(
+export function premiumPerUnit(
   kind: OptionKind,
   spot: number,
   strike: number,
-  cap: number,
   secondsToExpiry: number,
   vol: number,
 ): number {
-  if (kind === CALL) {
-    const near = bsCall(spot, strike, secondsToExpiry, vol)
-    const far = bsCall(spot, strike + cap, secondsToExpiry, vol)
-    return near > far ? near - far : 0
-  }
-  if (kind === PUT) {
-    const lower = strike > cap ? strike - cap : 0
-    const near = bsPut(spot, strike, secondsToExpiry, vol)
-    const far = bsPut(spot, lower, secondsToExpiry, vol)
-    return near > far ? near - far : 0
-  }
+  if (kind === CALL) return bsCall(spot, strike, secondsToExpiry, vol)
+  if (kind === PUT) return bsPut(spot, strike, secondsToExpiry, vol)
   throw new Error(`unknown option kind ${kind}`)
 }
 
@@ -107,18 +97,16 @@ export function previewPremium(
   kind: OptionKind,
   spot: number,
   strike: number,
-  cap: number,
   secondsToExpiry: number,
   vol: number,
   size: number,
 ): number {
-  return cappedPremiumPerUnit(kind, spot, strike, cap, secondsToExpiry, vol) * size
+  return premiumPerUnit(kind, spot, strike, secondsToExpiry, vol) * size
 }
 
-/** Realized capped intrinsic payoff per unit at settlement spot. Mirrors settle(). */
-export function cappedPayoffPerUnit(kind: OptionKind, spot: number, strike: number, cap: number): number {
-  const intrinsic = kind === CALL ? Math.max(0, spot - strike) : Math.max(0, strike - spot)
-  return Math.min(intrinsic, cap)
+/** Realized intrinsic payoff per unit at settlement spot (no cap). */
+export function payoffPerUnit(kind: OptionKind, spot: number, strike: number): number {
+  return kind === CALL ? Math.max(0, spot - strike) : Math.max(0, strike - spot)
 }
 
 export const KIND = { CALL, PUT } as const

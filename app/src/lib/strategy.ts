@@ -1,54 +1,47 @@
-import type { Deployment, MakerEntry } from './deployment'
-import { parseUnits } from 'viem'
+import type { Deployment, MakerQuote } from './deployment'
 
-// Strategy constants mirror contracts/script/Ship.s.sol + Demo.s.sol so the UI's
-// Strategy tuple hashes to the maker's shipped strategy. The maker is the party
-// that SHIPPED the collateral, recorded in the deployment JSON — never the
-// connected wallet, which is the taker. volWad default 0.5e18 (50% annualised IV)
-// matches the scripts.
+// The on-chain Strategy tuple. Field order is LOAD-BEARING: WeekendOptions.hashStrategy
+// is keccak256(abi.encode(s)) and must equal the hash Aqua derived from the identical
+// bytes the maker shipped. See WeekendOptions.sol:42 (struct Strategy) — there is
+// deliberately no poolId/decimals; vol is the only competitive axis.
 export const UNDERLYING_DECIMALS = 18
 export const QUOTE_DECIMALS = 6
-export const DEFAULT_VOL_WAD = parseUnits('0.5', 18) // 0.5e18
-export const DEFAULT_SALT = ('0x' + '00'.repeat(31) + '01') as `0x${string}` // bytes32(uint256(1))
 
 export interface StrategyTuple {
   app: `0x${string}`
   maker: `0x${string}`
   underlying: `0x${string}`
   quote: `0x${string}`
-  poolId: `0x${string}`
-  underlyingIsCurrency0: boolean
-  underlyingDecimals: number
-  quoteDecimals: number
   volWad: bigint
+  minPremiumBps: number
+  maxSecondsToExpiry: bigint
   salt: `0x${string}`
 }
 
 /**
- * Build the on-chain Strategy tuple from the deployment.
+ * Build the on-chain Strategy tuple for a shipped maker quote.
  *
- * `maker` overrides the maker identity + their pricing axis (volWad, salt). Pass
- * `deployment.makers?.[0]` to quote a listed maker, or — in the Earn view only,
- * where the connected wallet IS the maker — the wallet's own entry. Omitted, it
- * falls back to the deployment's single `maker` at the default 50% IV.
+ * `maxSecondsToExpiry` is derived from the quote's series deadline: the shipped order
+ * was calibrated for that tenor, and `_buyOption` reverts `TenorTooLong` if a series'
+ * remaining life exceeds it. We use a generous bound (the order deadline) so a fill
+ * near expiry still clears; the maker's real protection is the vol they shipped.
  */
-export function buildStrategy(d: Deployment, maker?: MakerEntry): StrategyTuple {
+export function buildStrategy(d: Deployment, q: MakerQuote): StrategyTuple {
   return {
-    app: d.gapOptionsApp as `0x${string}`,
-    maker: (maker?.address ?? d.maker) as `0x${string}`,
+    app: d.weekendOptions as `0x${string}`,
+    maker: q.maker as `0x${string}`,
     underlying: d.nvdax as `0x${string}`,
     quote: d.usdc as `0x${string}`,
-    poolId: d.poolId as `0x${string}`,
-    underlyingIsCurrency0: d.underlyingIsCurrency0,
-    underlyingDecimals: UNDERLYING_DECIMALS,
-    quoteDecimals: QUOTE_DECIMALS,
-    volWad: maker ? BigInt(maker.volWad) : DEFAULT_VOL_WAD,
-    salt: (maker?.salt ?? DEFAULT_SALT) as `0x${string}`,
+    volWad: BigInt(q.volWad),
+    minPremiumBps: q.minPremiumBps,
+    maxSecondsToExpiry: BigInt(q.deadline),
+    salt: q.salt as `0x${string}`,
   }
 }
 
 /** WAD vol -> the plain number the client-side preview wants. */
 export const volFromWad = (wad: bigint): number => Number(wad) / 1e18
 
-/** Default annualised vol as a plain number, for the client-side preview. */
-export const DEFAULT_VOL = 0.5
+/** WAD vol -> percent string for display, e.g. 600000000000000000n -> "60". */
+export const volPct = (wad: bigint | string | number): string =>
+  (Number(BigInt(wad)) / 1e16).toFixed(0)

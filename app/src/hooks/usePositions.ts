@@ -1,52 +1,66 @@
 /* ============================================================================
-   The user's ERC-1155 option positions, read from the chain.
+   The wallet's WeekendOptions positions, read from the chain.
 
-   Positions used to live in a React useState array that only the buy handler
-   appended to — so a reload wiped them and the panel lied ("No positions yet")
-   about positions that provably exist on chain. This hook is the fix: it
-   discovers positions from `OptionBought` logs and hydrates each one from
-   `positions(id)` + `balanceOf(holder, id)`, so the panel is on-chain truth.
+   WeekendOptions is one ERC-20 per series, so there is no ERC-1155 positions(id)
+   anymore. A wallet's exposure to a series has two legs: a HOLDER balance
+   (OptionToken.balanceOf, the options it can exercise/redeem/sell) and a WRITER
+   amount (written[series][wallet], the cover it posted and can close/claim).
+
+   Discovery is a direct walk, not a log scan: seriesCount() -> getSeries(i), then
+   per series read balanceOf(holder) + written(i, holder) + totalSupply. Series
+   are few and dense (ids 0..count-1), so this is a handful of reads and always
+   on-chain truth — a reload can't lose a position the chain still holds.
+
+   Logs are used only for the History tab (OptionWritten / Exercised), which still
+   needs the wide-range endpoint below.
    ========================================================================= */
 
 import { useCallback, useEffect, useState } from 'react'
 import { createPublicClient, http } from 'viem'
 import { baseSepolia } from 'viem/chains'
 import { usePublicClient } from 'wagmi'
-import { gapOptionsAppAbi } from '../lib/abi'
-import { buildStrategy, type StrategyTuple } from '../lib/strategy'
-import { liveRows, toPosition, type Position, type PositionRecord } from './positions'
-import type { Deployment, MakerEntry } from '../lib/deployment'
+import { optionTokenAbi, weekendOptionsAbi } from '../lib/abi'
+import { liveRows, toPosition, type Position, type SeriesRecord } from './positions'
+import type { Deployment } from '../lib/deployment'
 
 /**
  * eth_getLogs needs its OWN endpoint. The app's transport (sepolia.base.org)
  * rejects any range wider than 200 blocks ("eth_getLogs is limited to a 200
  * range") and Alchemy's free tier caps it at 10 — neither can reach back to the
- * deploy block, and chunking a ~12k-block history into 200-block pages would be
- * ~60 requests per refresh. publicnode serves the whole range in one call and
- * sends `access-control-allow-origin: *`, so the browser can hit it directly.
- * This is exactly what contracts/script/settle-keeper.sh does (GAP_LOGS_RPC_URL).
- * Reads and writes still go through the wagmi client.
+ * deploy block. publicnode serves the whole range in one call and sends
+ * `access-control-allow-origin: *`, so the browser can hit it directly. This is
+ * exactly what contracts/script/settle-keeper.sh does. Reads and writes still go
+ * through the wagmi client; only the history log scan uses this.
  */
 const LOGS_RPC_URL =
   import.meta.env.VITE_LOGS_RPC_URL || 'https://base-sepolia-rpc.publicnode.com'
 
-/** Scanning from 0 is rejected by every provider, so start at the app's deploy
- *  block. Overridable per-deployment (`deployBlock` in the deployment JSON) and
- *  per-environment, so a redeploy does not silently hide older positions. */
+/** Scanning from 0 is rejected by every provider, so start at the deploy block.
+ *  Overridable per-deployment (`deployBlock`) and per-environment. */
 const DEFAULT_FROM_BLOCK = BigInt(import.meta.env.VITE_GAP_FROM_BLOCK || 55_300_000)
 
 const logsClient = createPublicClient({ chain: baseSepolia, transport: http(LOGS_RPC_URL) })
 
 export type { Position }
 
+/** One historical event, flattened for the History tab. */
+export interface HistoryRow {
+  kind: 'written' | 'exercised'
+  seriesId: number
+  amount: bigint
+  /** OptionWritten only: premium paid, 6dp quote units. */
+  premium: bigint
+  blockNumber: bigint
+  txHash: `0x${string}`
+}
+
 export interface PositionsState {
   positions: Position[]
+  history: HistoryRow[]
   loading: boolean
   error: string | null
-  /** Re-read logs + records. Call after a buy or settle receipt lands. */
+  /** Re-read series + balances. Call after a trade/exercise/settle receipt lands. */
   refetch: () => void
-  /** The Strategy tuple whose hash matches, or undefined if no shipped maker does. */
-  strategyFor: (hash: `0x${string}`) => StrategyTuple | undefined
 }
 
 export function usePositions(
@@ -56,47 +70,13 @@ export function usePositions(
 ): PositionsState {
   const client = usePublicClient()
   const [positions, setPositions] = useState<Position[]>([])
+  const [history, setHistory] = useState<HistoryRow[]>([])
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
-  const [strategies, setStrategies] = useState<Map<string, StrategyTuple>>(new Map())
   const [nonce, setNonce] = useState(0)
   const refetch = useCallback(() => setNonce((n) => n + 1), [])
 
-  // `settle` takes the full Strategy struct but the Position record stores only
-  // its hash, so index every shipped maker's tuple by what the app hashes it to
-  // — the same trick settle-keeper.sh uses. hashStrategy is a pure view.
-  useEffect(() => {
-    if (!deployed || !deployment || !client) return
-    let cancelled = false
-    const app = deployment.gapOptionsApp as `0x${string}`
-    // Older deployment JSON has no `makers` array; buildStrategy(d, undefined)
-    // falls back to the single top-level maker at the default IV.
-    const makers: (MakerEntry | undefined)[] = deployment.makers?.length
-      ? deployment.makers
-      : [undefined]
-    void Promise.all(
-      makers.map(async (m) => {
-        const s = buildStrategy(deployment, m)
-        const h = (await client.readContract({
-          address: app,
-          abi: gapOptionsAppAbi,
-          functionName: 'hashStrategy',
-          args: [s],
-        })) as `0x${string}`
-        return [h.toLowerCase(), s] as const
-      }),
-    )
-      .then((entries) => {
-        if (!cancelled) setStrategies(new Map(entries))
-      })
-      .catch(() => {
-        if (!cancelled) setStrategies(new Map())
-      })
-    return () => {
-      cancelled = true
-    }
-  }, [client, deployment, deployed])
-
+  // Positions: walk every series, read both legs for this holder.
   useEffect(() => {
     if (!deployed || !deployment || !client || !holder) {
       setPositions([])
@@ -105,41 +85,44 @@ export function usePositions(
     }
     let cancelled = false
     setLoading(true)
+    const app = deployment.weekendOptions as `0x${string}`
     void (async () => {
       try {
-        const app = deployment.gapOptionsApp as `0x${string}`
-        const logs = await logsClient.getContractEvents({
+        const count = (await client.readContract({
           address: app,
-          abi: gapOptionsAppAbi,
-          eventName: 'OptionBought',
-          args: { to: holder },
-          fromBlock: deployment.deployBlock ? BigInt(deployment.deployBlock) : DEFAULT_FROM_BLOCK,
-          toBlock: 'latest',
-        })
-        // premium is only in the log; the Position record does not keep it.
-        const premiums = new Map<bigint, bigint>()
-        for (const l of logs) {
-          if (l.args.positionId != null) premiums.set(l.args.positionId, l.args.premium ?? 0n)
-        }
-        // ponytail: one pair of reads per position, no multicall — a user has a
-        // handful of these. Batch them if someone ever holds hundreds.
+          abi: weekendOptionsAbi,
+          functionName: 'seriesCount',
+        })) as bigint
+
+        const ids = Array.from({ length: Number(count) }, (_, i) => i)
         const rows = await Promise.all(
-          [...premiums.keys()].map(async (id) => {
-            const [rec, balance] = await Promise.all([
+          ids.map(async (id) => {
+            const ser = (await client.readContract({
+              address: app,
+              abi: weekendOptionsAbi,
+              functionName: 'getSeries',
+              args: [BigInt(id)],
+            })) as unknown as SeriesRecord
+            const [balance, written, totalSupply] = await Promise.all([
               client.readContract({
-                address: app,
-                abi: gapOptionsAppAbi,
-                functionName: 'positions',
-                args: [id],
-              }),
-              client.readContract({
-                address: app,
-                abi: gapOptionsAppAbi,
+                address: ser.token,
+                abi: optionTokenAbi,
                 functionName: 'balanceOf',
-                args: [holder, id],
-              }),
+                args: [holder],
+              }) as Promise<bigint>,
+              client.readContract({
+                address: app,
+                abi: weekendOptionsAbi,
+                functionName: 'written',
+                args: [BigInt(id), holder],
+              }) as Promise<bigint>,
+              client.readContract({
+                address: ser.token,
+                abi: optionTokenAbi,
+                functionName: 'totalSupply',
+              }) as Promise<bigint>,
             ])
-            return toPosition(id, rec as PositionRecord, balance as bigint, premiums.get(id) ?? 0n)
+            return toPosition(id, ser, balance, written, totalSupply)
           }),
         )
         if (cancelled) return
@@ -158,10 +141,63 @@ export function usePositions(
     }
   }, [client, deployment, deployed, holder, nonce])
 
-  const strategyFor = useCallback(
-    (hash: `0x${string}`) => strategies.get(hash.toLowerCase()),
-    [strategies],
-  )
+  // History: OptionWritten(to=holder) + Exercised(holder) over the full range.
+  useEffect(() => {
+    if (!deployed || !deployment || !holder) {
+      setHistory([])
+      return
+    }
+    let cancelled = false
+    const app = deployment.weekendOptions as `0x${string}`
+    const fromBlock = deployment.deployBlock ? BigInt(deployment.deployBlock) : DEFAULT_FROM_BLOCK
+    void (async () => {
+      try {
+        const [written, exercised] = await Promise.all([
+          logsClient.getContractEvents({
+            address: app,
+            abi: weekendOptionsAbi,
+            eventName: 'OptionWritten',
+            args: { to: holder },
+            fromBlock,
+            toBlock: 'latest',
+          }),
+          logsClient.getContractEvents({
+            address: app,
+            abi: weekendOptionsAbi,
+            eventName: 'Exercised',
+            args: { holder },
+            fromBlock,
+            toBlock: 'latest',
+          }),
+        ])
+        if (cancelled) return
+        const rows: HistoryRow[] = [
+          ...written.map((l) => ({
+            kind: 'written' as const,
+            seriesId: Number(l.args.seriesId ?? 0n),
+            amount: l.args.amount ?? 0n,
+            premium: l.args.premium ?? 0n,
+            blockNumber: l.blockNumber ?? 0n,
+            txHash: l.transactionHash as `0x${string}`,
+          })),
+          ...exercised.map((l) => ({
+            kind: 'exercised' as const,
+            seriesId: Number(l.args.seriesId ?? 0n),
+            amount: l.args.amount ?? 0n,
+            premium: 0n,
+            blockNumber: l.blockNumber ?? 0n,
+            txHash: l.transactionHash as `0x${string}`,
+          })),
+        ].sort((a, b) => Number(b.blockNumber - a.blockNumber))
+        setHistory(rows)
+      } catch {
+        if (!cancelled) setHistory([])
+      }
+    })()
+    return () => {
+      cancelled = true
+    }
+  }, [deployment, deployed, holder, nonce])
 
-  return { positions, loading, error, refetch, strategyFor }
+  return { positions, history, loading, error, refetch }
 }

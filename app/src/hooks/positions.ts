@@ -1,77 +1,84 @@
 /* Pure position decoding for usePositions: no React, no wagmi, so the raw
-   `positions(id)` tuple -> UI row mapping can be checked against real chain
-   values without a browser (see positions.selfcheck.ts). The panel showing
-   "No positions yet" for a position that exists on chain is exactly the class
-   of bug this file exists to make checkable. */
+   Series tuple + balanceOf + written -> UI row mapping can be checked against real
+   chain values without a browser (see positions.selfcheck.ts).
+
+   WeekendOptions model: one ERC-20 per series. A user can be a HOLDER (balanceOf > 0)
+   and/or a WRITER (written[series][user] > 0) of the same series. A single row carries
+   both legs so the Positions tab shows a wallet's full exposure to a series. */
 
 import { formatUnits } from 'viem'
 import { KIND, type OptionKind } from '../lib/pricing.ts'
 
-/** Strike, cap and size are WAD (1e18) on chain; premium is in quote units. */
-export const PRICE_DECIMALS = 18
-export const PREMIUM_DECIMALS = 6
+/** Option amounts + underlying are 18dp; strike + premiums are 6dp quote units. */
+export const AMOUNT_DECIMALS = 18
+export const QUOTE_DECIMALS = 6
 
 export interface Position {
-  /** Hex position id for real positions, `preview-xxxx` for local previews. */
-  positionId: string
-  /** False only for the local, not-on-chain preview rows. */
-  onchain: boolean
+  seriesId: number
   kind: OptionKind
+  /** Strike in quote units (USD), e.g. 99.999999. */
   strike: number
-  cap: number
-  size: number
   /** Unix seconds. */
   expiry: number
-  /** Premium actually paid, in quote units (USDC). */
-  premium: number
+  /** The per-series option ERC-20. */
+  token: `0x${string}`
   settled: boolean
-  /** ERC-1155 balance still held. 0 => settled or transferred away. */
+  /** Holder balance, 18dp bigint — options the wallet can exercise/redeem/sell. */
   balance: bigint
-  /** The strategy this position hashes to — needed to rebuild `settle`'s tuple. */
-  strategyHash?: `0x${string}`
+  /** Writer position, 18dp bigint — options the wallet wrote and can close/claim. */
+  written: bigint
+  /** Live total supply of the series token, 18dp. */
+  totalSupply: bigint
+  /** Settlement price in quote units, valid only when `settled`. */
+  settlePrice: number
 }
 
-/** The `positions(uint256)` return tuple, in Solidity order. */
-export type PositionRecord = readonly [
-  `0x${string}`, // strategyHash
-  `0x${string}`, // maker
-  `0x${string}`, // underlying
-  `0x${string}`, // quote
-  number, // kind (0 = CALL, 1 = PUT)
-  bigint, // strike, WAD
-  bigint, // cap, WAD
-  bigint, // expiry, unix seconds
-  bigint, // size, WAD
-  boolean, // settled
-  bigint, // capBacking, quote units
-]
+/** The getSeries(id) return tuple, in Solidity order (WeekendOptions.sol:58). */
+export type SeriesRecord = {
+  underlying: `0x${string}`
+  expiry: bigint
+  kind: number
+  strike: bigint
+  token: `0x${string}`
+  totalWritten: bigint
+  poolUnderlying: bigint
+  poolCash: bigint
+  settled: boolean
+  settlePrice: bigint
+  supplyAtSettle: bigint
+  holderUnderlying: bigint
+  holderCash: bigint
+  writerUnderlying: bigint
+  writerCash: bigint
+  writtenAtSettle: bigint
+}
 
 const num = (v: bigint, decimals: number) => Number(formatUnits(v, decimals))
 
-/** `positions(id)` + `balanceOf` + the log's premium -> one table row. */
+/** getSeries(id) + holder balanceOf + written + totalSupply -> one table row. */
 export function toPosition(
-  id: bigint,
-  rec: PositionRecord,
+  seriesId: number,
+  ser: SeriesRecord,
   balance: bigint,
-  premium: bigint,
+  written: bigint,
+  totalSupply: bigint,
 ): Position {
   return {
-    positionId: `0x${id.toString(16).padStart(64, '0')}`,
-    onchain: true,
-    kind: (rec[4] === 1 ? KIND.PUT : KIND.CALL) as OptionKind,
-    strike: num(rec[5], PRICE_DECIMALS),
-    cap: num(rec[6], PRICE_DECIMALS),
-    size: num(rec[8], PRICE_DECIMALS),
-    expiry: Number(rec[7]),
-    premium: num(premium, PREMIUM_DECIMALS),
-    settled: rec[9],
+    seriesId,
+    kind: (ser.kind === 1 ? KIND.PUT : KIND.CALL) as OptionKind,
+    strike: num(ser.strike, QUOTE_DECIMALS),
+    expiry: Number(ser.expiry),
+    token: ser.token,
+    settled: ser.settled,
     balance,
-    strategyHash: rec[0],
+    written,
+    totalSupply,
+    settlePrice: num(ser.settlePrice, QUOTE_DECIMALS),
   }
 }
 
-/** A position with no balance left is settled or transferred away — not the
- *  holder's any more. Soonest expiry first, so the actionable row is on top. */
+/** A row with neither a holder balance nor a written leg is not the wallet's
+ *  concern. Soonest expiry first, so the actionable row is on top. */
 export function liveRows(rows: Position[]): Position[] {
-  return rows.filter((p) => p.balance > 0n).sort((a, b) => a.expiry - b.expiry)
+  return rows.filter((p) => p.balance > 0n || p.written > 0n).sort((a, b) => a.expiry - b.expiry)
 }
