@@ -8,8 +8,11 @@ import './ui'
 import App from './App.tsx'
 import { wagmiConfig } from './lib/wagmi.ts'
 
-// #kit opens the UI-kit board. One hash check beats pulling in a router.
+// #kit opens the UI-kit board, #pitch the deck. Both are full-bleed surfaces
+// that replace the desk rather than render inside it, so they branch here
+// instead of inside App's view switch. One hash check beats pulling in a router.
 const Kit = lazy(() => import('./pages/Kit.tsx'))
+const Pitch = lazy(() => import('./pages/Pitch.tsx'))
 
 function Root() {
   const [hash, setHash] = useState(() => location.hash)
@@ -18,13 +21,21 @@ function Root() {
     addEventListener('hashchange', onHash)
     return () => removeEventListener('hashchange', onHash)
   }, [])
-  return hash === '#kit' ? (
-    <Suspense fallback={null}>
-      <Kit />
-    </Suspense>
-  ) : (
-    <App />
-  )
+  if (hash === '#kit') {
+    return (
+      <Suspense fallback={null}>
+        <Kit />
+      </Suspense>
+    )
+  }
+  if (hash === '#pitch') {
+    return (
+      <Suspense fallback={null}>
+        <Pitch />
+      </Suspense>
+    )
+  }
+  return <App />
 }
 
 const queryClient = new QueryClient()
