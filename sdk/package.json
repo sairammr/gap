@@ -2,7 +2,7 @@
   "name": "@gap/sdk",
   "version": "0.0.0",
   "private": true,
-  "description": "SwapVM order encoder for Weekend Options on the Aqua path",
+  "description": "SwapVM order encoder for GAP on the Aqua path",
   "type": "module",
   "main": "orders.ts",
   "scripts": {

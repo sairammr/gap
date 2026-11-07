@@ -1,4 +1,4 @@
-# keeper — Weekend Options settlement
+# keeper — GAP settlement
 
 Nothing in this protocol settles itself. Every payout entry point is
 **permissionless**, so this process needs no privileged key — only gas.

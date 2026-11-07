@@ -2,7 +2,7 @@
   "name": "@gap/keeper",
   "version": "0.0.0",
   "private": true,
-  "description": "Settlement keeper for Weekend Options — records, settles, redeems and claims on the permissionless entry points",
+  "description": "Settlement keeper for GAP — records, settles, redeems and claims on the permissionless entry points",
   "type": "module",
   "main": "index.js",
   "scripts": {

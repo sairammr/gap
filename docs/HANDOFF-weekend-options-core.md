@@ -1,4 +1,4 @@
-# Weekend Options core — handoff
+# GAP options core — handoff
 
 Scope: the options **core** contracts (`WeekendOptions`, `OptionToken`, `WeekendTaker`,
 `V4SpotOracle`, `IPriceOracle`) and their test suites. The SwapVM trading layer

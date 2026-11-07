@@ -1,4 +1,4 @@
-# Weekend Options — Frontend Integration Handoff
+# GAP — Frontend Integration Handoff
 
 > For an agent building the UI in a separate worktree. You need no prior context.
 > Contracts live in `contracts/src/`. **Do not edit them** — another agent owns that tree.

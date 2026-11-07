@@ -1,5 +1,5 @@
 /**
- * SwapVM order encoder for Weekend Options on the Aqua path.
+ * SwapVM order encoder for GAP on the Aqua path.
  *
  * An order IS a resting quote. The program is
  *   Deadline + Salt + RequireMinRate + Extruction(WeekendPricer, args)
