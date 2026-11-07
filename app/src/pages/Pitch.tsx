@@ -21,6 +21,7 @@ import { useEffect, useRef, useState, type ReactNode } from 'react'
 import { ArrowLeft } from 'lucide-react'
 import { ArchitectureDiagram } from './ArchitectureDiagram'
 import { GapOutcomeChart } from './GapOutcomeChart'
+import { SystemBlocks } from './SystemBlocks'
 import { UpsidePayoff, FloorPayoff } from './PayoffDiagram'
 import './pitch.css'
 
@@ -161,6 +162,19 @@ const SLIDES: Slide[] = [
             </tr>
           </tbody>
         </table>
+      </>
+    ),
+  },
+  {
+    tag: 'System',
+    wide: true,
+    render: (
+      <>
+        <div className="pd__kicker">Teal is the Aqua rail · violet is what we built</div>
+        <h2 className="pd__h pd__h--sm">Maker ships. Taker swaps. We write the option.</h2>
+        <div className="pd__arch">
+          <SystemBlocks />
+        </div>
       </>
     ),
   },

@@ -933,3 +933,65 @@
 @media (prefers-reduced-motion: no-preference) {
   .is-live .pd__shot img { animation: pd-fade 700ms ease-out 200ms backwards; }
 }
+
+/* --- system block diagram -------------------------------------------------
+   A flow, not an inventory. Teal is the Aqua/SwapVM rail, violet is what we
+   wrote, and the numbered circles carry the reading order so the eye does not
+   have to guess which of five boxes comes first.
+   ------------------------------------------------------------------------ */
+
+.sb { display: block; width: 100%; height: auto; overflow: visible; }
+
+.sb-box { fill: var(--surface); stroke: var(--line-strong); stroke-width: 1; }
+.sb-box--actor { fill: var(--surface-sunken); stroke: var(--line-strong); }
+.sb-box--inch { fill: var(--teal-wash); stroke: var(--brand-teal); stroke-width: 1.5; }
+.sb-box--ours { fill: var(--violet-wash); stroke: var(--brand-violet); stroke-width: 1.5; }
+
+.sb-n { stroke-width: 1.5; }
+.sb-n.sb-box--inch { fill: var(--surface); stroke: var(--brand-teal); }
+.sb-n.sb-box--ours { fill: var(--surface); stroke: var(--brand-violet); }
+.sb-n-t { font: 600 13px/1 var(--mono); fill: var(--ink); }
+
+.sb-t { font: 600 16px/1 var(--sans); fill: var(--ink); }
+.sb-s { font: 400 12px/1 var(--sans); fill: var(--muted); }
+.sb-s--dim { fill: var(--n-300); }
+
+.sb-wire { stroke: var(--line-strong); stroke-width: 1.5; fill: none; }
+.sb-wire--down { stroke: var(--line-strong); }
+.sb-wire--out { stroke: var(--brand-violet); stroke-dasharray: 5 4; }
+.sb-wire--pull { stroke: var(--brand-teal); stroke-dasharray: 5 4; }
+.sb-head { fill: var(--n-500); }
+
+/* Call labels sit on the wiring, so they carry a surface-coloured outline
+   rather than being nudged around the lines by hand. */
+.sb-call,
+.sb-s--dim {
+  font: 500 12px/1 var(--mono);
+  fill: var(--ink-soft);
+  paint-order: stroke;
+  stroke: var(--surface);
+  stroke-width: 5px;
+  stroke-linejoin: round;
+}
+
+.sb-call--up { fill: var(--brand-violet); }
+.sb-call--pull { fill: var(--brand-teal); }
+
+.sb-foot { fill: var(--surface-sunken); stroke: var(--line); stroke-width: 1; }
+.sb-foot-t { font: 500 14px/1 var(--sans); fill: var(--ink-soft); }
+
+.pd__slide--wide .sb { max-height: calc(100dvh - 268px); }
+
+@media (prefers-reduced-motion: no-preference) {
+  /* The steps arrive in their numbered order — the sequence IS the content. */
+  .is-live .sb-box--actor { animation: pd-fade 420ms ease-out 60ms backwards; }
+  .is-live .sb-box--inch,
+  .is-live .sb-box--ours,
+  .is-live .sb-n,
+  .is-live .sb-n-t { animation: pd-fade 380ms ease-out backwards; }
+  .is-live g:nth-of-type(1) .sb-box--inch { animation-delay: 200ms; }
+  .is-live .sb-wire { animation: pd-fade 400ms ease-out 700ms backwards; }
+  .is-live .sb-call { animation: pd-fade 400ms ease-out 820ms backwards; }
+  .is-live .sb-foot,
+  .is-live .sb-foot-t { animation: pd-fade 500ms ease-out 1000ms backwards; }
+}
