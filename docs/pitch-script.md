@@ -122,6 +122,54 @@ back, it expires, holders exercise, the maker redeems what's left — and the
 books net to zero. There's a UI, you can do the whole thing from a wallet.
 Nothing in it is faked.
 
+## 7. The demo
+
+Four tabs. Trade, Earn, Positions, Pitch. I'll go left to right.
+
+**Earn first, because that's the maker.**
+
+This is the side that has the stock. I pick the series — the stock, the strike,
+the expiry — and I set my volatility. That's my price. Then I commit.
+
+Notice what that transaction did. It moved zero tokens. My NVDAx is still in my
+wallet, I can go spend it right now if I want. All I did was record that I'm
+willing to write up to this many options at this price. If nobody trades with
+me all weekend, nothing happened and it cost me nothing.
+
+**Now Trade. This is the taker.**
+
+Here's the book — those are live quotes, and the size you see is read straight
+off the ledger, not off a server we're running.
+
+I pick one, type a size, and the ticket prices it. That premium is
+Black-Scholes, computed on chain, right now, using the spot price out of the
+Uniswap pool this token actually trades in.
+
+Before anything opens my wallet, I get this card. What I pay, what I receive,
+what I'm holding, and how many signatures it's going to take. Nothing happens
+until I've read that.
+
+I confirm. One transaction: USDC leaves me, the maker's stock gets pulled out of
+their wallet, the option is created against it, and the premium lands with the
+maker. All of it, or none of it.
+
+**Positions.**
+
+There it is. What I hold, what the strike is, when it expires.
+
+And I can go straight back to the book and sell it back — same desk, on the bid
+side, which is priced lower than the ask. That spread is what the maker makes
+for being there.
+
+**History.**
+
+Every one of those is a real transaction hash on Base Sepolia. You can click
+through to any of them.
+
+That's the whole cycle — commit, buy, sell back, and when a series expires,
+exercise and redeem. It runs end to end. Nothing on these screens is mocked and
+nothing is computed off chain.
+
 ---
 
 ## Delivery notes

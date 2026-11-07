@@ -8,7 +8,7 @@
 
 **Tech Stack:** Solidity 0.8.30, Foundry (forge/anvil at `~/.foundry/bin`), `@1inch/aqua@1.0.2-rc.2` (npm), `@uniswap/v4-core@1.0.2` / `v4-periphery@1.0.3`, `solady`, `@openzeppelin/contracts@5.6.1`; `1inch/swap-vm` from git (unpublished); frontend Vite + React + TS + wagmi + viem + `lightweight-charts@^5.2.1`.
 
-**Spec:** `docs/superpowers/specs/2026-11-06-gap-tradefi-platform-design.md` (and its source `# Aqua App Build Spec — Weekend Options .md`, verified by `docs/SPEC-VERIFICATION.md`).
+**Spec:** `docs/superpowers/specs/2026-11-06-gap-tradefi-platform-design.md` (and its source `docs/aqua-app-build-spec.md`, verified by `docs/SPEC-VERIFICATION.md`).
 
 ## Global Constraints
 

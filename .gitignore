@@ -25,5 +25,9 @@ contracts/node_modules/
 app/node_modules/
 app/dist/
 
+# macOS
+.DS_Store
+**/.DS_Store
+
 # Claude Code session state and worktrees
 .claude/

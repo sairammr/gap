@@ -3,7 +3,7 @@
 **Status:** draft for approval
 **Date:** 2026-11-06
 **Bounty:** ETHGlobal "Build an Aqua App" ($5,000)
-**Source-grounded by:** `# Aqua App Build Spec — Weekend Options .md` and `docs/SPEC-VERIFICATION.md`
+**Source-grounded by:** `docs/aqua-app-build-spec.md` and `docs/SPEC-VERIFICATION.md`
 (both `[VERIFIED]` against `1inch/aqua@main`, `1inch/swap-vm@main`, and live `eth_getCode` on Base 8453 / Base Sepolia 84532).
 
 > **Scope note (2026-11-06):** the spot-swap product was cut at the user's request — Gap is **overnight-gap options only**. That is the key part. The Aqua settlement core, mock NVDAx, v4 pool, and frontend all serve options; references to a swap tab/entrypoint are removed below.
