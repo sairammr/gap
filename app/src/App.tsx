@@ -74,7 +74,6 @@ import {
   QuickPills,
   Segmented,
   TopNav,
-  StatCard,
   Table,
   Tabs,
   TokenDot,
@@ -180,7 +179,6 @@ export default function App() {
 
   const spot = useSpotSeries(deployment, deployed)
   const spotPrice = spot.lastSpot ?? 100
-  const closes = useMemo(() => spot.candles.map((c) => c.close), [spot.candles])
 
   // The shipped resting orders, straight from the deployment (no log scan to paint).
   const quotes = useMemo(() => (deployment ? makerQuotes(deployment) : []), [deployment])
@@ -647,6 +645,38 @@ export default function App() {
           </Badge>
         </div>
       </div>
+
+      {/* The metrics that used to sit in four stacked tiles under the book.
+          As a strip under the price they read as one instrument panel and
+          stop stealing a screen's worth of the book's column. */}
+      <div className="ck-metrics">
+        <div className="ck-metric">
+          <span className="ck-metric__k">Premium</span>
+          <span className="ck-metric__v">{bindingPremium.toFixed(4)}</span>
+          <span className="ck-metric__s">
+            {selected ? `series ${selected.seriesId} · ${size} opt` : '—'}
+          </span>
+        </div>
+        <div className="ck-metric">
+          <span className="ck-metric__k">Strike</span>
+          <span className="ck-metric__v">{strikeUsd.toFixed(2)}</span>
+          <span className="ck-metric__s">
+            {seriesKind === KIND.CALL ? 'CALL — writer locks NVDAx' : 'PUT — writer locks USDC'}
+          </span>
+        </div>
+        <div className="ck-metric">
+          <span className="ck-metric__k">Available</span>
+          <span className="ck-metric__v">
+            {availableOptions == null ? '—' : availableOptions.toFixed(2)}
+          </span>
+          <span className="ck-metric__s">options this quote can still fill</span>
+        </div>
+        <div className="ck-metric">
+          <span className="ck-metric__k">Implied vol</span>
+          <span className="ck-metric__v">{selected ? `${volPct(selected.volWad)}%` : '—'}</span>
+          <span className="ck-metric__s">the maker&rsquo;s only pricing axis</span>
+        </div>
+      </div>
       <PriceChart candles={spot.candles} synthetic={spot.synthetic} />
     </Card>
   )
@@ -817,7 +847,7 @@ export default function App() {
                         ? `${Number(formatUnits(cap.coverCommitted < cap.coverWallet ? cap.coverCommitted : cap.coverWallet, isCall ? UNDERLYING_DECIMALS : QUOTE_DECIMALS)).toFixed(2)} ${isCall ? 'NVDAx' : 'USDC'}`
                         : `${Number(formatUnits(cap.usdc, QUOTE_DECIMALS)).toFixed(2)} USDC`,
                   ],
-                  ['Exercise', 'physical — no price feed involved'],
+                  ['Exercise', 'physical · no oracle'],
                 ] as [string, string][]
               ).map(([k, v]) => (
                 <div className="tk-sum__r" key={k}>
@@ -899,38 +929,9 @@ export default function App() {
 
           {view === 'trade' && (
             <div className="vx-grid vx-grid--trade">
-              <div className="vx-col vx-col--book">
-                {restingOrders}
-                <div className="vx-grid vx-grid--stats vx-grid--stats-stacked">
-                  <StatCard
-                    pair="Spot (v4)"
-                    color="#7b61ff"
-                    value={spotPrice.toFixed(2)}
-                    sub="sqrtPriceX96 → USDC"
-                    series={closes.slice(-24)}
-                  />
-                  <StatCard
-                    pair="Premium"
-                    color="#14ccbb"
-                    value={bindingPremium.toFixed(4)}
-                    sub={selected ? `series ${selected.seriesId} · ${size} opt` : '—'}
-                  />
-                  <StatCard
-                    pair="Strike"
-                    color="#22c55e"
-                    value={strikeUsd.toFixed(2)}
-                    sub={isCall ? 'CALL — writer locks NVDAx' : 'PUT — writer locks USDC'}
-                  />
-                  <StatCard
-                    pair="Available"
-                    color="#f59e0b"
-                    value={availableOptions == null ? '—' : availableOptions.toFixed(2)}
-                    sub="options this quote can still fill"
-                  />
-                </div>
-              </div>
+              <div className="vx-col vx-col--book">{restingOrders}</div>
 
-              <div className="vx-col">
+              <div className="vx-col vx-col--chart">
                 {chartPanel}
                 <Card>
                   <Tabs

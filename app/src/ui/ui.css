@@ -329,9 +329,25 @@
 
 /* --- Key/value telemetry grid -------------------------------------------- */
 .vx-kv { display: flex; flex-direction: column; gap: 2px; }
-.vx-kv__row { display: flex; align-items: center; justify-content: space-between; gap: var(--s-3); padding: 7px 0; }
-.vx-kv__k { font: var(--t-body-s); color: var(--muted); }
-.vx-kv__v { font: 500 13px/18px var(--mono); font-variant-numeric: tabular-nums; }
+/* The label never wraps and the value never pushes it: a two-line "Strategy
+   hash" label beside a value that has overflowed its column is the wrap this
+   layout kept producing. The label keeps its one line, the value takes what is
+   left, and a long mono string (a hash, an address) breaks inside itself. */
+.vx-kv__row {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: baseline;
+  gap: var(--s-4);
+  padding: 7px 0;
+}
+.vx-kv__k { font: var(--t-body-s); color: var(--muted); white-space: nowrap; }
+.vx-kv__v {
+  font: 500 13px/18px var(--mono);
+  font-variant-numeric: tabular-nums;
+  min-width: 0;
+  text-align: right;
+  overflow-wrap: anywhere;
+}
 
 .vx-tiles { display: grid; grid-template-columns: 1fr 1fr; gap: var(--s-2); }
 .vx-tile { background: var(--surface-sunken); border-radius: var(--r-md); padding: 12px 14px; }
@@ -759,14 +775,23 @@
 .vx-grid--trade { grid-template-columns: minmax(0, 1fr); }
 .vx-col--ticket { order: -1; }
 .vx-col--book { order: 0; }
+.vx-col--chart { order: 1; }
 
-/* Wide: book | chart + positions | ticket, the three-column desk. */
+/* Wide: chart + positions | book | ticket. The chart takes the left because
+   it is the widest thing on the page and the one that benefits from the space;
+   the book and the ticket are both fixed-width instruments and sit together on
+   the right, which is also where the hand already is. */
 @media (min-width: 1240px) {
   .vx-grid--trade {
-    grid-template-columns: 288px minmax(0, 1fr) 376px;
+    /* book | chart | ticket, at 20 / 60 / 20. The chart is the only pane that
+       gets better with width; the book and the ticket are fixed-content
+       instruments and only need enough room not to clip, so their minimums
+       are floors, not targets. */
+    grid-template-columns: minmax(252px, 1fr) minmax(0, 3fr) minmax(268px, 1fr);
     align-items: start;
   }
   .vx-col--ticket,
+  .vx-col--chart,
   .vx-col--book { order: 0; }
   /* The ticket is the one thing that should never scroll out of reach. */
   .vx-col--ticket { position: sticky; top: var(--s-4); }
@@ -780,7 +805,7 @@
 .vx-book__row,
 .vx-book__mid {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 56px 42px 62px;
+  grid-template-columns: minmax(84px, 1fr) 48px 34px 52px;
   gap: var(--s-2);
   align-items: center;
 }
@@ -859,3 +884,83 @@
   overflow: hidden;
   text-overflow: ellipsis;
 }
+
+
+/* -- chart header metrics -------------------------------------------------
+   Four numbers that used to be four stacked cards under the book, where they
+   ate a screen of the column the orders needed. A strip under the price reads
+   as one instrument panel and costs one row.
+   ------------------------------------------------------------------------ */
+
+.ck-metrics {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  border-top: 1px solid var(--line);
+  margin-top: var(--s-4);
+}
+
+.ck-metric {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: var(--s-3) var(--s-5);
+  border-right: 1px solid var(--line);
+  min-width: 0;
+}
+
+.ck-metric:last-child { border-right: 0; }
+
+.ck-metric__k {
+  font: var(--t-caption);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--muted);
+}
+
+.ck-metric__v {
+  font: 600 20px/26px var(--sans);
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.02em;
+  color: var(--ink);
+}
+
+.ck-metric__s {
+  font: var(--t-caption);
+  color: var(--muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+
+/* -- narrower side columns --------------------------------------------------
+   At 20% each the book and ticket carry the same information in ~80px less,
+   so density goes up: smaller numerals, tighter rows, less gutter. The chart
+   keeps its scale because it is the pane that earns the width.
+   ------------------------------------------------------------------------ */
+
+@media (min-width: 1240px) {
+  .vx-col--book .vx-book__hd,
+  .vx-col--book .vx-book__row,
+  .vx-col--book .vx-book__mid {
+    gap: var(--s-1);
+    padding-left: var(--s-2);
+    padding-right: var(--s-2);
+  }
+
+  .vx-col--book .vx-book__row { font-size: 12px; padding-top: 7px; padding-bottom: 7px; }
+  .vx-col--book .vx-panel__head,
+  .vx-col--ticket .vx-panel__head { padding-left: var(--s-4); padding-right: var(--s-4); }
+
+  .vx-col--ticket .vx-kv__row { padding-top: 7px; padding-bottom: 7px; font-size: 12px; }
+  .vx-col--ticket .vx-card { padding: var(--s-4); }
+}
+
+
+/* Segmented controls size to their label rather than wrapping it onto three
+   lines in a narrow column. */
+.vx-segmented button { white-space: nowrap; }
+
+/* A value cell whose content is a flex row (a hash beside a button) ignores
+   text-align, so it has to be pushed to the end explicitly. */
+.vx-kv__v > .vx-row { justify-content: flex-end; flex-wrap: nowrap; }
